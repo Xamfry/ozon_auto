@@ -14,6 +14,15 @@ class Settings(BaseModel):
 
     ozon_timeout_sec: float = float(os.getenv("OZON_TIMEOUT_SEC", "30"))
     ozon_limit_per_page: int = int(os.getenv("OZON_LIMIT_PER_PAGE", "1000"))
+    
+    autorus_state_path: str = os.getenv("AUTORUS_STATE_PATH", "state_autorus.json").strip()
+    autorus_allow_autologin: bool = os.getenv("AUTORUS_ALLOW_AUTOLOGIN", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
 
     def validate_required(self) -> None:
         missing = []

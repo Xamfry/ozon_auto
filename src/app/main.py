@@ -7,6 +7,7 @@ from .repositories.ozon_details import OzonDetailsRepo, OzonProductDetails
 from pathlib import Path
 from .autorus_pw_session import AutorusPwSession
 from .pricing import PriceInput, DimensionsMM, calculate_ozon_price
+from .config import settings
 
 
 def chunked(seq: list[str], size: int) -> list[list[str]]:
@@ -64,12 +65,18 @@ def main() -> None:
     print(f"Supplier sync кандидатов: {len(rows)}")
 
     # headless=True для Linux сервера
-    state_path = "data/state_autorus.json"
-    if not Path(state_path).exists() and Path("state_autorus.json").exists():
-        state_path = "state_autorus.json"
+    state_path = settings.autorus_state_path
+    state_file = Path(state_path)
+    if not state_file.exists():
+        raise RuntimeError(
+            f"Autorus: state-файл не найден: {state_file.resolve()} "
+            "(укажи AUTORUS_STATE_PATH или положи файл по пути из конфигурации)."
+        )
 
-    with AutorusPwSession(state_path=state_path, headless=True) as s:
-        s.ensure_logged_in(allow_autologin=False)
+    print(f"Autorus state: {state_file.resolve()} (exists={state_file.exists()})")
+
+    with AutorusPwSession(state_path=str(state_file), headless=True) as s:
+        s.ensure_logged_in(allow_autologin=settings.autorus_allow_autologin)
         for r in rows:
             
             # Проверка габаритов

@@ -41,6 +41,10 @@ class AutorusPwSession:
         self.delay_max = 3
 
     def __enter__(self) -> "AutorusPwSession":
+        state_file = Path(self.state_path)
+        if not state_file.exists():
+            raise RuntimeError(f"Autorus: state-файл не найден: {state_file.resolve()}")
+
         self._p = sync_playwright().start()
         self._browser = self._p.chromium.launch(headless=self.headless)
         self._context = self._browser.new_context(
@@ -53,6 +57,13 @@ class AutorusPwSession:
         )
         self._page = self._context.new_page()
         self._page.set_default_timeout(120_000)
+        st = state_file.stat()
+        self.log.info(
+            "[STATE] path=%s size=%s mtime=%s",
+            state_file.resolve(),
+            st.st_size,
+            int(st.st_mtime),
+        )
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -239,7 +250,7 @@ class AutorusPwSession:
             self._save_debug("guest_mode.html", html)
             raise RuntimeError(
                 "Autorus: гостевой режим. State не применился или протух. "
-                "Проверь путь к state_autorus.json / пересоздай state."
+                f"Проверь path={Path(self.state_path).resolve()} / пересоздай state."
             )
 
         self._login_via_modal_and_save_state()
@@ -280,4 +291,5 @@ class AutorusPwSession:
 
         # Сохраняем state (cookies + storage)
         Path(os.path.dirname(self.state_path) or ".").mkdir(parents=True, exist_ok=True)
+        
         self._context.storage_state(path=self.state_path)
