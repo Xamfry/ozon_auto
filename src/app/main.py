@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from .ozon_client import OzonClient
-from .db import connect, init_db
-from .repositories.ozon_products import OzonProductsRepo
-from .repositories.ozon_details import OzonDetailsRepo, OzonProductDetails
 from pathlib import Path
+
 from .autorus_pw_session import AutorusPwSession
-from .pricing import PriceInput, DimensionsMM, calculate_ozon_price
 from .config import settings
+from .db import connect, init_db
+from .ozon_client import OzonClient
+from .pricing import DimensionsMM, PriceInput, calculate_ozon_price
+from .repositories.ozon_details import OzonDetailsRepo, OzonProductDetails
+from .repositories.ozon_products import OzonProductsRepo
 
 
 def chunked(seq: list[str], size: int) -> list[list[str]]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+def _has_dimensions(row) -> bool:
+    return bool(row.length_mm and row.width_mm and row.height_mm and row.weight_g)
 
 
 def main() -> None:
@@ -21,7 +26,7 @@ def main() -> None:
     products_repo = OzonProductsRepo(con)
     details_repo = OzonDetailsRepo(con)
 
-    # --------- 1) Ozon: обновить список товаров + статусы/комиссии/цены + габариты ---------
+    # 1) Ozon sync: products + statuses + commissions + dimensions
     oz = OzonClient()
     try:
         base_list = oz.list_products_all(include_archived=False, visibility="ALL")
@@ -35,7 +40,6 @@ def main() -> None:
         products_repo.upsert_many(approved)
 
         approved_offer_ids = [x.offer_id for x in approved]
-
         attrs_rows = []
         for batch in chunked(approved_offer_ids, 1000):
             attrs_rows.extend(oz.get_attributes_by_offer_ids(batch))
@@ -54,99 +58,85 @@ def main() -> None:
         ]
         details_repo.upsert_many(details)
 
-        print(f"Ozon: неархивных: {len(base_list)}")
-        print(f"Ozon: approved в БД: {len(approved)}")
-        print(f"Ozon: деталей записано: {len(details)}")
+        print(f"Ozon: non-archived={len(base_list)}")
+        print(f"Ozon: approved in DB={len(approved)}")
+        print(f"Ozon: details saved={len(details)}")
     finally:
         oz.close()
 
-    # --------- 2) Supplier + pricing: пройти по товарам из БД ---------
+    # 2) Supplier + pricing: iterate products from DB
     rows = products_repo.list_for_supplier_sync()
-    print(f"Supplier sync кандидатов: {len(rows)}")
+    print(f"Supplier sync candidates: {len(rows)}")
 
-    # headless=True для Linux сервера
-    state_path = settings.autorus_state_path
-    state_file = Path(state_path)
+    state_file = Path(settings.autorus_state_path)
     if not state_file.exists():
         raise RuntimeError(
-            f"Autorus: state-файл не найден: {state_file.resolve()} "
-            "(укажи AUTORUS_STATE_PATH или положи файл по пути из конфигурации)."
+            f"Autorus: state-file not found: {state_file.resolve()} "
+            "(set AUTORUS_STATE_PATH or place file at configured path)."
         )
-
     print(f"Autorus state: {state_file.resolve()} (exists={state_file.exists()})")
 
-    with AutorusPwSession(state_path=str(state_file), headless=True) as s:
-        s.ensure_logged_in(allow_autologin=settings.autorus_allow_autologin)
-        for r in rows:
-            
-            # Проверка габаритов
-            if not (r.length_mm and r.width_mm and r.height_mm and r.weight_g):
-                # нет габаритов -> не считаем цену
+    done = 0
+    skipped = 0
+    failed = 0
+
+    with AutorusPwSession(state_path=str(state_file), headless=True) as supplier:
+        supplier.ensure_logged_in(allow_autologin=settings.autorus_allow_autologin)
+
+        for row in rows:
+            if not _has_dimensions(row):
+                skipped += 1
+                continue
+            if row.commission_fbs_percent is None:
+                skipped += 1
                 continue
 
-            # Проверка комиссии
-            if r.commission_fbs_percent is None:
+            pcode = (row.offer_id or "").strip()
+            if not pcode:
+                skipped += 1
                 continue
 
-            pcode = r.offer_id.strip()
+            parts_url = (row.supplier_parts_url or "").strip() or None
+            supplier.log.info("[ITEM] offer_id=%s pcode=%s parts_url=%s", row.offer_id, pcode, "yes" if parts_url else "no")
 
-            # 2.1 parts_url: если есть -> сразу parts; если нет -> search -> parts
-            supplier_brand = None
-            supplier_number = None
-            parts_url = (r.supplier_parts_url or "").strip() or None
-            s.log.info(f"[ITEM] offer_id={r.offer_id} pcode={pcode} parts_url={'yes' if parts_url else 'no'}")
-            s._sleep()
             try:
-                if not parts_url:
-                    result = s.search_pcode(pcode)
-                    if "parts_url" in result:
-                        supplier_brand = result["brand"]
-                        supplier_number = result["number"]
-                        parts_url = result["parts_url"]
-                    else:
-                        resolved = s.resolve_from_search_detail(result["search_detail_url"])
-                        supplier_brand = resolved["brand"]
-                        supplier_number = resolved["number"]
-                        parts_url = resolved["parts_url"]
-
-                offer = s.get_first_offer_from_parts(parts_url)
+                snapshot = supplier.fetch_product_snapshot(pcode=pcode, parts_url=parts_url)
+                offer = snapshot.offer
                 if offer is None:
-                    # не нашли склад/оффер
+                    skipped += 1
                     continue
 
-                # сохраним цену/остатки поставщика
                 products_repo.update_supplier_fields(
-                    offer_id=r.offer_id,
-                    supplier_brand=supplier_brand,
-                    supplier_number=supplier_number,
-                    supplier_parts_url=parts_url,
+                    offer_id=row.offer_id,
+                    supplier_brand=snapshot.brand,
+                    supplier_number=snapshot.number,
+                    supplier_parts_url=snapshot.parts_url,
                     supplier_price_rub=float(offer.price_rub),
                     supplier_qty=int(offer.qty),
                 )
 
-                # 2.2 рассчитать цену Ozon
                 inp = PriceInput(
                     закуп=float(offer.price_rub),
-                    markup_percent=float(r.markup_percent or 0.0),
+                    markup_percent=float(row.markup_percent or 0.0),
                 )
                 dims = DimensionsMM(
-                    length_mm=int(r.length_mm),
-                    width_mm=int(r.width_mm),
-                    height_mm=int(r.height_mm),
-                    weight_g=int(r.weight_g),
+                    length_mm=int(row.length_mm),
+                    width_mm=int(row.width_mm),
+                    height_mm=int(row.height_mm),
+                    weight_g=int(row.weight_g),
                 )
-
                 res = calculate_ozon_price(
                     inp=inp,
                     dims=dims,
-                    commission_percent=float(r.commission_fbs_percent),
+                    commission_percent=float(row.commission_fbs_percent),
                 )
-
-                products_repo.update_ozon_price_calc(r.offer_id, res.final_price)
+                products_repo.update_ozon_price_calc(row.offer_id, res.final_price)
+                done += 1
             except Exception as e:
-                s.log.exception(f"[FAIL] offer_id={r.offer_id} pcode={pcode}: {e}")
-                continue
+                failed += 1
+                supplier.log.exception("[FAIL] offer_id=%s pcode=%s: %s", row.offer_id, pcode, e)
 
+    print(f"Supplier sync done={done}, skipped={skipped}, failed={failed}")
     con.close()
 
 

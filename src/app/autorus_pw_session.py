@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
-from urllib.parse import quote
 import random
 import time
-import os
+from urllib.parse import quote, urljoin
+
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+from playwright.sync_api import TimeoutError as PWTimeoutError
+from playwright.sync_api import sync_playwright
+
 from .logging_setup import setup_logging
 
 
@@ -24,6 +27,15 @@ class AutorusOffer:
     qty: int
     price_rub: float
     deadline: str
+
+
+@dataclass(frozen=True)
+class SupplierProductSnapshot:
+    pcode: str
+    brand: str | None
+    number: str | None
+    parts_url: str | None
+    offer: AutorusOffer | None
 
 
 class AutorusPwSession:
@@ -43,11 +55,7 @@ class AutorusPwSession:
     def __enter__(self) -> "AutorusPwSession":
         state_file = Path(self.state_path)
         if not state_file.exists():
-            raise RuntimeError(f"Autorus: state-файл не найден: {state_file.resolve()}")
-
-        state_file = Path(self.state_path)
-        if not state_file.exists():
-            raise RuntimeError(f"Autorus: state-файл не найден: {state_file.resolve()}")
+            raise RuntimeError(f"Autorus: state-file not found: {state_file.resolve()}")
 
         self._p = sync_playwright().start()
         self._browser = self._p.chromium.launch(headless=self.headless)
@@ -61,6 +69,7 @@ class AutorusPwSession:
         )
         self._page = self._context.new_page()
         self._page.set_default_timeout(120_000)
+
         st = state_file.stat()
         self.log.info(
             "[STATE] path=%s size=%s mtime=%s",
@@ -77,33 +86,16 @@ class AutorusPwSession:
             self._browser.close()
         if self._p:
             self._p.stop()
-    
-    def _sleep(self) -> None:
-        time.sleep(random.uniform(self.delay_min, self.delay_max))
 
-    def _is_guest_mode(self, page) -> bool:
-        # на сохранённой странице есть блок "Вы работаете в гостевом режиме"
-        txt = page.locator("body").inner_text(timeout=2000)
-        return "гостевом режиме" in txt.lower()
-
-    def _save_debug(self, name: str, html: str) -> None:
-        import os
-        os.makedirs("data", exist_ok=True)
-        with open(f"data/{name}", "w", encoding="utf-8") as f:
-            f.write(html)
-
-    def _build_parts_url(self, brand: str, number: str) -> str:
-        # бренд может содержать пробел/&, поэтому кодируем сегменты
-        return f"https://b2b.autorus.ru/parts/{quote(brand, safe='')}/{quote(number, safe='')}"
-    
     @property
     def page(self):
         if self._page is None:
-            raise RuntimeError("Playwright page not initialized. Use 'with AutorusPwSession(...) as s:'")
+            raise RuntimeError("Playwright page not initialized. Use context manager.")
         return self._page
 
+    def _sleep(self) -> None:
+        time.sleep(random.uniform(self.delay_min, self.delay_max))
 
-    # ---------- utils ----------
     @staticmethod
     def _text(el) -> str:
         return " ".join(el.get_text(" ", strip=True).split()) if el else ""
@@ -122,139 +114,211 @@ class AutorusPwSession:
         except Exception:
             return 0.0
 
-    # ---------- steps ----------
-    def search_pcode(self, pcode: str):
-        """
-        1) /search?pcode=...
-        2) если есть goodsInfoTitle -> сразу brand/number
-        3) если таблица результатов -> берём первую строку и идём на /search/BRAND/PCODE
-        4) retry: сначала pcode как есть, потом без дефисов
-        """
+    @staticmethod
+    def _normalize_pcode(value: str) -> str:
+        return "".join(ch for ch in (value or "").upper() if ch.isalnum())
 
-        def _try(one: str):
-            self.log.info(f"[SEARCH] pcode={one}")
-            url = f"https://b2b.autorus.ru/search?pcode={quote(one)}&whCode="
-            self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            self._sleep()
+    @staticmethod
+    def _variants_for_search(pcode: str) -> list[str]:
+        base = (pcode or "").strip()
+        compact = "".join(ch for ch in base if ch.isalnum())
+        out = [base]
+        if compact and compact != base:
+            out.append(compact)
+        return [x for x in out if x]
 
-            if self._is_guest_mode(self._page):
-                html = self._page.content()
-                self._save_debug("search_guest_mode.html", html)
-                raise RuntimeError("Autorus: гостевой режим. Обнови state_autorus.json (supplier_login).")
+    def _save_debug(self, name: str, html: str) -> None:
+        Path("data").mkdir(exist_ok=True)
+        with open(f"data/{name}", "w", encoding="utf-8") as f:
+            f.write(html)
 
-            # Вариант A: “как у AT-HDR-08” — есть блок товара
-            title = self._page.locator("span.goodsInfoTitle").first
-            if title.count():
-                brand = title.locator("span.article-brand").inner_text().strip()
-                number = title.locator("span.article-number").inner_text().strip()
-                parts_url = self._build_parts_url(brand, number)
-                self.log.info(f"[SEARCH] direct hit brand={brand} number={number} parts={parts_url}")
-                return {"brand": brand, "number": number, "parts_url": parts_url}
+    def _is_guest_mode(self) -> bool:
+        txt = self.page.locator("body").inner_text(timeout=2000)
+        return "гостевом режиме" in txt.lower()
 
-            # Вариант B: список брендов (как в твоём search_unexpected.html)
-            # <tr class="startSearching" data-link="/search/3RG/31311">
-            row = self._page.locator("table.globalCase tbody tr.startSearching").first
-            if row.count():
-                data_link = row.get_attribute("data-link") or ""
-                if not data_link:
-                    html = self._page.content()
-                    self._save_debug("search_unexpected_no_datalink.html", html)
-                    raise RuntimeError("Autorus: не нашёл data-link в первой строке поиска.")
+    def _ensure_not_guest_or_raise(self, stage: str) -> None:
+        if self._is_guest_mode():
+            html = self.page.content()
+            self._save_debug(f"{stage}_guest_mode.html", html)
+            raise RuntimeError("Autorus: guest mode. Refresh state_autorus.json.")
 
-                search_detail_url = "https://b2b.autorus.ru" + data_link
-                self.log.info(f"[SEARCH] list hit -> {search_detail_url}")
-                return {"search_detail_url": search_detail_url}
+    def _build_parts_url(self, brand: str, number: str) -> str:
+        return f"{self.BASE}/parts/{quote(brand, safe='')}/{quote(number, safe='')}"
 
-            # Ничего не подошло
-            html = self._page.content()
-            self._save_debug("search_unexpected.html", html)
-            raise RuntimeError("Autorus: неожиданный HTML на /search (сохранено data/search_unexpected.html)")
-
-        # 1) пробуем как есть
-        try:
-            return _try(pcode)
-        except RuntimeError as e:
-            # гостевой режим не ретраим
-            if "гостевой режим" in str(e).lower():
-                raise
-
-        # 2) если есть дефисы — пробуем без них
-        p2 = pcode.replace("-", "").replace(" ", "")
-        if p2 != pcode:
-            return _try(p2)
-
-        # если уже без дефисов, пробросим исходную ошибку
-        raise
-
-    
-    def get_first_offer_from_parts(self, parts_url: str) -> AutorusOffer | None:
-        assert self._page is not None
-
-        # commit — чтобы не зависать на тяжёлых ресурсах
-        self._page.goto(parts_url, wait_until="commit")
-        try:
-            self._page.wait_for_selector(".distrInfoBlockWrapper", timeout=120_000)
-        except PWTimeoutError:
-            Path("data").mkdir(exist_ok=True)
-            self._page.screenshot(path="data/parts_timeout.png", full_page=True)
-            with open("data/parts_timeout.html", "w", encoding="utf-8") as f:
-                f.write(self._page.content())
-            raise RuntimeError("Timeout на /parts. Сохранено data/parts_timeout.*")
-
-        html = self._page.content()
+    def _extract_search_resolution(self, pcode: str, html: str, current_url: str) -> dict | None:
+        wanted = self._normalize_pcode(pcode)
         soup = BeautifulSoup(html, "lxml")
 
-        w = soup.select_one(".distrInfoBlockWrapper")
-        if not w:
-            Path("data").mkdir(exist_ok=True)
-            with open("data/parts_no_offers.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            return None
+        title = soup.select_one("span.goodsInfoTitle")
+        if title:
+            brand = self._text(title.select_one("span.article-brand")) or self._text(soup.select_one(".article-brand"))
+            number = self._text(title.select_one("span.article-number")) or self._text(soup.select_one(".article-number"))
+            if brand and number:
+                return {
+                    "brand": brand,
+                    "number": number,
+                    "parts_url": self._build_parts_url(brand, number),
+                }
 
-        deadline = self._text(w.select_one(".distrInfoDeadline div:nth-of-type(2)"))
-        qty_txt = self._text(w.select_one(".distrInfoAvailability .fr-text-nowrap"))
-        qty = self._parse_int(qty_txt)
-        warehouse = self._text(w.select_one(".distrInfoRoute .fr-text-nowrap"))
-        price_txt = self._text(w.select_one(".distrInfoPrice"))
-        price = self._parse_price(price_txt)
+        for tr in soup.select("tr[class*='resultTr']"):
+            pcode_el = tr.select_one(".resultPartCode a")
+            if pcode_el and self._normalize_pcode(self._text(pcode_el)) != wanted:
+                continue
+            img = tr.select_one("img.searchResultImg")
+            if img and img.get("data-brand") and img.get("data-number"):
+                brand = str(img.get("data-brand") or "").strip()
+                number = str(img.get("data-number") or "").strip()
+                if brand and number:
+                    return {
+                        "brand": brand,
+                        "number": number,
+                        "parts_url": self._build_parts_url(brand, number),
+                    }
 
-        return AutorusOffer(warehouse=warehouse, qty=qty, price_rub=price, deadline=deadline)
+        first_row = soup.select_one("table.globalCase tbody tr.startSearching")
+        if first_row and first_row.get("data-link"):
+            return {"search_detail_url": urljoin(current_url, str(first_row.get("data-link")))}
+
+        return None
+
+    def _resolve_parts_ref_by_pcode(self, pcode: str) -> AutorusPartRef:
+        last_error: Exception | None = None
+
+        for one in self._variants_for_search(pcode):
+            try:
+                search_url = f"{self.BASE}/search?pcode={quote(one)}&whCode="
+                self.log.info("[SUPPLIER] search pcode=%s", one)
+                self.page.goto(search_url, wait_until="domcontentloaded", timeout=60_000)
+                self._sleep()
+                self._ensure_not_guest_or_raise("search")
+
+                html = self.page.content()
+                resolved = self._extract_search_resolution(one, html, self.page.url)
+                if not resolved:
+                    continue
+                if "parts_url" in resolved:
+                    return AutorusPartRef(
+                        brand=resolved["brand"],
+                        number=resolved["number"],
+                        parts_url=resolved["parts_url"],
+                    )
+
+                detail_url = resolved["search_detail_url"]
+                self.log.info("[SUPPLIER] search detail=%s", detail_url)
+                self.page.goto(detail_url, wait_until="domcontentloaded", timeout=60_000)
+                self._sleep()
+                self._ensure_not_guest_or_raise("search_detail")
+
+                detail_html = self.page.content()
+                detail_soup = BeautifulSoup(detail_html, "lxml")
+                title = detail_soup.select_one("span.goodsInfoTitle")
+                brand = self._text(title.select_one("span.article-brand")) if title else self._text(detail_soup.select_one(".article-brand"))
+                number = self._text(title.select_one("span.article-number")) if title else self._text(detail_soup.select_one(".article-number"))
+                if brand and number:
+                    return AutorusPartRef(
+                        brand=brand,
+                        number=number,
+                        parts_url=self._build_parts_url(brand, number),
+                    )
+            except Exception as e:
+                last_error = e
+
+        self._save_debug("search_unresolved.html", self.page.content())
+        if last_error:
+            raise RuntimeError(f"Autorus: failed to resolve pcode={pcode}: {last_error}") from last_error
+        raise RuntimeError(f"Autorus: failed to resolve pcode={pcode}")
+
+    def _fetch_first_offer_from_parts(self, parts_url: str) -> tuple[str | None, str | None, AutorusOffer | None]:
+        self.log.info("[SUPPLIER] parts=%s", parts_url)
+        self.page.goto(parts_url, wait_until="domcontentloaded", timeout=120_000)
+        self._sleep()
+        self._ensure_not_guest_or_raise("parts")
+
+        try:
+            self.page.wait_for_selector(".distrInfoBlockWrapper, .article-brand, .article-number", timeout=120_000)
+        except PWTimeoutError as e:
+            self._save_debug("parts_timeout.html", self.page.content())
+            raise RuntimeError("Autorus: timeout on /parts page.") from e
+
+        html = self.page.content()
+        soup = BeautifulSoup(html, "lxml")
+        brand = self._text(soup.select_one(".article-brand")) or None
+        number = self._text(soup.select_one(".article-number")) or None
+
+        block = soup.select_one(".distrInfoBlockWrapper")
+        if not block:
+            self._save_debug("parts_no_offers.html", html)
+            return brand, number, None
+
+        offer = AutorusOffer(
+            warehouse=self._text(block.select_one(".distrInfoRoute .fr-text-nowrap")),
+            qty=self._parse_int(self._text(block.select_one(".distrInfoAvailability .fr-text-nowrap"))),
+            price_rub=self._parse_price(self._text(block.select_one(".distrInfoPrice"))),
+            deadline=self._text(block.select_one(".distrInfoDeadline div:nth-of-type(2)")),
+        )
+        return brand, number, offer
+
+    # New full-cycle supplier fetch
+    def fetch_product_snapshot(self, pcode: str, parts_url: str | None = None) -> SupplierProductSnapshot:
+        existing_parts = (parts_url or "").strip() or None
+        if existing_parts:
+            brand, number, offer = self._fetch_first_offer_from_parts(existing_parts)
+            return SupplierProductSnapshot(
+                pcode=pcode,
+                brand=brand,
+                number=number,
+                parts_url=existing_parts,
+                offer=offer,
+            )
+
+        resolved = self._resolve_parts_ref_by_pcode(pcode)
+        brand, number, offer = self._fetch_first_offer_from_parts(resolved.parts_url)
+        return SupplierProductSnapshot(
+            pcode=pcode,
+            brand=resolved.brand or brand,
+            number=resolved.number or number,
+            parts_url=resolved.parts_url,
+            offer=offer,
+        )
+
+    # Backward-compatible wrappers
+    def search_pcode(self, pcode: str):
+        ref = self._resolve_parts_ref_by_pcode(pcode)
+        return {"brand": ref.brand, "number": ref.number, "parts_url": ref.parts_url}
 
     def resolve_from_search_detail(self, search_detail_url: str):
-        self.log.info(f"[SEARCH-DETAIL] {search_detail_url}")
-        self._page.goto(search_detail_url, wait_until="domcontentloaded", timeout=60000)
+        self.page.goto(search_detail_url, wait_until="domcontentloaded", timeout=60_000)
         self._sleep()
+        self._ensure_not_guest_or_raise("search_detail")
 
-        if self._is_guest_mode(self._page):
-            html = self._page.content()
-            self._save_debug("search_detail_guest_mode.html", html)
-            raise RuntimeError("Autorus: гостевой режим на search detail. Обнови state_autorus.json (supplier_login).")
+        html = self.page.content()
+        soup = BeautifulSoup(html, "lxml")
+        title = soup.select_one("span.goodsInfoTitle")
+        brand = self._text(title.select_one("span.article-brand")) if title else self._text(soup.select_one(".article-brand"))
+        number = self._text(title.select_one("span.article-number")) if title else self._text(soup.select_one(".article-number"))
+        if not brand or not number:
+            self._save_debug("search_detail_unexpected.html", html)
+            raise RuntimeError("Autorus: cannot resolve brand/number from search detail.")
 
-        title = self._page.locator("span.goodsInfoTitle").first
-        if title.count():
-            brand = title.locator("span.article-brand").inner_text().strip()
-            number = title.locator("span.article-number").inner_text().strip()
-            parts_url = self._build_parts_url(brand, number)
-            self.log.info(f"[SEARCH-DETAIL] resolved brand={brand} number={number} parts={parts_url}")
-            return {"brand": brand, "number": number, "parts_url": parts_url}
+        parts_url = self._build_parts_url(brand, number)
+        return {"brand": brand, "number": number, "parts_url": parts_url}
 
-        html = self._page.content()
-        self._save_debug("search_detail_unexpected.html", html)
-        raise RuntimeError("Autorus: не нашёл goodsInfoTitle на /search/BRAND/PCODE (см. data/search_detail_unexpected.html)")
+    def get_first_offer_from_parts(self, parts_url: str) -> AutorusOffer | None:
+        _, _, offer = self._fetch_first_offer_from_parts(parts_url)
+        return offer
 
     def ensure_logged_in(self, allow_autologin: bool = False) -> None:
         self.page.goto(f"{self.BASE}/", wait_until="domcontentloaded", timeout=60_000)
         self._sleep()
 
-        if not self._is_guest_mode(self.page):
+        if not self._is_guest_mode():
             return
 
         if not allow_autologin:
-            html = self.page.content()
-            self._save_debug("guest_mode.html", html)
+            self._save_debug("guest_mode.html", self.page.content())
             raise RuntimeError(
-                "Autorus: гостевой режим. State не применился или протух. "
-                f"Проверь path={Path(self.state_path).resolve()} / пересоздай state."
+                "Autorus: guest mode. State is not valid or expired. "
+                f"Check path={Path(self.state_path).resolve()}."
             )
 
         self._login_via_modal_and_save_state()
@@ -263,37 +327,27 @@ class AutorusPwSession:
         login = os.getenv("AUTORUS_LOGIN", "").strip()
         password = os.getenv("AUTORUS_PASSWORD", "").strip()
         if not login or not password:
-            raise RuntimeError("Autorus: гостевой режим, но нет AUTORUS_LOGIN/AUTORUS_PASSWORD в .env")
+            raise RuntimeError("Autorus: guest mode and AUTORUS_LOGIN/AUTORUS_PASSWORD are empty.")
 
-        # Открываем главную и кликаем по кнопке/ссылке логина (открывает модалку)
         self.page.goto(f"{self.BASE}/", wait_until="domcontentloaded", timeout=60_000)
         self._sleep()
 
-        # Открыть модалку логина
         btn = self.page.locator("#logInModal")
         if btn.count() == 0:
-            raise RuntimeError("Autorus: не найден #logInModal на странице (изменилась верстка).")
+            raise RuntimeError("Autorus: #logInModal not found on page.")
         btn.first.click()
 
-        # Ждём поля модалки
         try:
             self.page.wait_for_selector("input#login.modalWindowControl", timeout=30_000)
             self.page.wait_for_selector("input#oass.modalWindowControl", timeout=30_000)
             self.page.wait_for_selector("input#go.modalWindowSubmitBtn", timeout=30_000)
-        except PWTimeoutError:
-            raise RuntimeError("Autorus: модалка логина не появилась или селекторы изменились.")
+        except PWTimeoutError as e:
+            raise RuntimeError("Autorus: login modal selectors not found.") from e
 
-        # Заполняем
         self.page.locator("input#login.modalWindowControl").fill(login)
         self.page.locator("input#oass.modalWindowControl").fill(password)
-
-        # Отправляем
         self.page.locator("input#go.modalWindowSubmitBtn").click()
-
-        # Дать странице время проставить cookies/редиректы
         self.page.wait_for_timeout(2500)
 
-        # Сохраняем state (cookies + storage)
         Path(os.path.dirname(self.state_path) or ".").mkdir(parents=True, exist_ok=True)
-        
         self._context.storage_state(path=self.state_path)
