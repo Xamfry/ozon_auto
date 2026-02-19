@@ -1,5 +1,5 @@
 from __future__ import annotations
-from ..autorus_pw_client import AutorusPwClient
+from ....tmp.autorus_pw_client import AutorusPwClient
 
 def main() -> None:
     pcode = input("pcode: ").strip()

@@ -41,56 +41,39 @@ class SupplierProductSnapshot:
 class AutorusPwSession:
     BASE = "https://b2b.autorus.ru"
 
-    def __init__(self, state_path: str = "state_autorus.json", headless: bool = True) -> None:
-        self.state_path = state_path
+    def __init__(self, profile_dir: str = "data/autorus_profile", headless: bool = True) -> None:
+        self.profile_dir = str(Path(profile_dir).resolve())
         self.headless = headless
         self._p = None
-        self._browser = None
         self._context = None
         self._page = None
         self.log = setup_logging()
         self.delay_min = 2
         self.delay_max = 3
 
-    def __enter__(self) -> "AutorusPwSession":
-        state_file = Path(self.state_path)
-        if not state_file.exists():
-            raise RuntimeError(f"Autorus: state-file not found: {state_file.resolve()}")
-
+    def __enter__(self):
         self._p = sync_playwright().start()
-        self._browser = self._p.chromium.launch(headless=self.headless)
-        self._context = self._browser.new_context(
-            storage_state=self.state_path,
+
+        # ВАЖНО: persistent context, а не storage_state
+        self._context = self._p.chromium.launch_persistent_context(
+            user_data_dir=self.profile_dir,
+            headless=self.headless,
             locale="ru-RU",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-            ),
         )
         self._page = self._context.new_page()
         self._page.set_default_timeout(120_000)
-
-        st = state_file.stat()
-        self.log.info(
-            "[STATE] path=%s size=%s mtime=%s",
-            state_file.resolve(),
-            st.st_size,
-            int(st.st_mtime),
-        )
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, exc_type, exc, tb):
         if self._context:
             self._context.close()
-        if self._browser:
-            self._browser.close()
         if self._p:
             self._p.stop()
 
     @property
     def page(self):
         if self._page is None:
-            raise RuntimeError("Playwright page not initialized. Use context manager.")
+            raise RuntimeError("Page is not initialized")
         return self._page
 
     def _sleep(self) -> None:
@@ -307,47 +290,3 @@ class AutorusPwSession:
         _, _, offer = self._fetch_first_offer_from_parts(parts_url)
         return offer
 
-    def ensure_logged_in(self, allow_autologin: bool = False) -> None:
-        self.page.goto(f"{self.BASE}/", wait_until="domcontentloaded", timeout=60_000)
-        self._sleep()
-
-        if not self._is_guest_mode():
-            return
-
-        if not allow_autologin:
-            self._save_debug("guest_mode.html", self.page.content())
-            raise RuntimeError(
-                "Autorus: guest mode. State is not valid or expired. "
-                f"Check path={Path(self.state_path).resolve()}."
-            )
-
-        self._login_via_modal_and_save_state()
-
-    def _login_via_modal_and_save_state(self) -> None:
-        login = os.getenv("AUTORUS_LOGIN", "").strip()
-        password = os.getenv("AUTORUS_PASSWORD", "").strip()
-        if not login or not password:
-            raise RuntimeError("Autorus: guest mode and AUTORUS_LOGIN/AUTORUS_PASSWORD are empty.")
-
-        self.page.goto(f"{self.BASE}/", wait_until="domcontentloaded", timeout=60_000)
-        self._sleep()
-
-        btn = self.page.locator("#logInModal")
-        if btn.count() == 0:
-            raise RuntimeError("Autorus: #logInModal not found on page.")
-        btn.first.click()
-
-        try:
-            self.page.wait_for_selector("input#login.modalWindowControl", timeout=30_000)
-            self.page.wait_for_selector("input#oass.modalWindowControl", timeout=30_000)
-            self.page.wait_for_selector("input#go.modalWindowSubmitBtn", timeout=30_000)
-        except PWTimeoutError as e:
-            raise RuntimeError("Autorus: login modal selectors not found.") from e
-
-        self.page.locator("input#login.modalWindowControl").fill(login)
-        self.page.locator("input#oass.modalWindowControl").fill(password)
-        self.page.locator("input#go.modalWindowSubmitBtn").click()
-        self.page.wait_for_timeout(2500)
-
-        Path(os.path.dirname(self.state_path) or ".").mkdir(parents=True, exist_ok=True)
-        self._context.storage_state(path=self.state_path)

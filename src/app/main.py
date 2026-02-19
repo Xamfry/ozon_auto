@@ -68,21 +68,15 @@ def main() -> None:
     rows = products_repo.list_for_supplier_sync()
     print(f"Supplier sync candidates: {len(rows)}")
 
-    state_file = Path(settings.autorus_state_path)
-    if not state_file.exists():
-        raise RuntimeError(
-            f"Autorus: state-file not found: {state_file.resolve()} "
-            "(set AUTORUS_STATE_PATH or place file at configured path)."
-        )
-    print(f"Autorus state: {state_file.resolve()} (exists={state_file.exists()})")
-
     done = 0
     skipped = 0
     failed = 0
 
-    with AutorusPwSession(state_path=str(state_file), headless=True) as supplier:
-        supplier.ensure_logged_in(allow_autologin=settings.autorus_allow_autologin)
-
+    with AutorusPwSession(profile_dir="data/autorus_profile", headless=True) as supplier:
+        supplier.page.goto("https://b2b.autorus.ru/search?pcode=AT-HDR-08&whCode=", wait_until="domcontentloaded")
+        if supplier._is_guest_mode(supplier.page):  # или отдельный public-метод
+            raise RuntimeError("Autorus: профиль не авторизован. Запусти bootstrap_autorus_profile.py")
+        
         for row in rows:
             if not _has_dimensions(row):
                 skipped += 1

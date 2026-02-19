@@ -15,7 +15,7 @@ def main() -> None:
     repo = SupplierAutorusRepo(con)
 
     # headless=True — для linux сервера без GUI
-    with AutorusPwSession(state_path="state_autorus.json", headless=True) as s:
+    with AutorusPwSession(profile_dir="data/autorus_profile", headless=True) as s:
         ref = s.search_pcode(pcode)
         offer = s.get_first_offer_from_parts(ref.parts_url)
 
