@@ -1,0 +1,12 @@
+/venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+/tmp
+/data
+.env
+state_autorus.json
+/src/app/repositories
+/src/app/tests
+
