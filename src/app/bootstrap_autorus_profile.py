@@ -10,7 +10,7 @@ def main():
         # persistent profile
         context = p.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
-            headless=True,   # нужен GUI только один раз (True)
+            headless=False,   # нужен GUI только один раз (True)
             locale="ru-RU",
         )
         page = context.new_page()

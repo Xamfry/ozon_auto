@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from .autorus_pw_session import AutorusPwSession
-from .config import settings
 from .db import connect, init_db
 from .ozon_client import OzonClient
 from .pricing import DimensionsMM, PriceInput, calculate_ozon_price
@@ -26,7 +25,7 @@ def main() -> None:
     products_repo = OzonProductsRepo(con)
     details_repo = OzonDetailsRepo(con)
 
-    # 1) Ozon sync: products + statuses + commissions + dimensions
+    # 1) Ozon sync
     oz = OzonClient()
     try:
         base_list = oz.list_products_all(include_archived=False, visibility="ALL")
@@ -36,7 +35,11 @@ def main() -> None:
         for batch in chunked(offer_ids, 1000):
             info_rows.extend(oz.get_product_info_list_by_offer_ids(batch))
 
-        approved = [x for x in info_rows if (not x.archived) and (x.moderate_status == "approved")]
+        approved = [
+            x for x in info_rows
+            if (not x.archived) and (x.moderate_status == "approved")
+        ]
+
         products_repo.upsert_many(approved)
 
         approved_offer_ids = [x.offer_id for x in approved]
@@ -64,7 +67,7 @@ def main() -> None:
     finally:
         oz.close()
 
-    # 2) Supplier + pricing: iterate products from DB
+    # 2) Supplier + pricing
     rows = products_repo.list_for_supplier_sync()
     print(f"Supplier sync candidates: {len(rows)}")
 
@@ -72,12 +75,28 @@ def main() -> None:
     skipped = 0
     failed = 0
 
-    with AutorusPwSession(profile_dir="data/autorus_profile", headless=True) as supplier:
-        supplier.page.goto("https://b2b.autorus.ru/search?pcode=AT-HDR-08&whCode=", wait_until="domcontentloaded")
-        if supplier._is_guest_mode(supplier.page):  # или отдельный public-метод
-            raise RuntimeError("Autorus: профиль не авторизован. Запусти bootstrap_autorus_profile.py")
-        
+    profile_dir = "data/autorus_profile"
+    if not Path(profile_dir).exists():
+        raise RuntimeError(
+            "Autorus profile not found: data/autorus_profile. "
+            "Run: python -m src.app.bootstrap_autorus_profile"
+        )
+
+    with AutorusPwSession(profile_dir=profile_dir, headless=False) as supplier:
+        # health-check: must not be guest mode
+        supplier.page.goto(
+            "https://b2b.autorus.ru/search?pcode=AT-HDR-08&whCode=",
+            wait_until="domcontentloaded",
+            timeout=60_000,
+        )
+        # if supplier.is_guest_mode():
+        #     raise RuntimeError(
+        #         "Autorus: profile is not authorized (guest mode). "
+        #         "Run bootstrap_autorus_profile again and login manually."
+        #     )
+
         for row in rows:
+            # базовые фильтры
             if not _has_dimensions(row):
                 skipped += 1
                 continue
@@ -91,7 +110,13 @@ def main() -> None:
                 continue
 
             parts_url = (row.supplier_parts_url or "").strip() or None
-            supplier.log.info("[ITEM] offer_id=%s pcode=%s parts_url=%s", row.offer_id, pcode, "yes" if parts_url else "no")
+
+            supplier.log.info(
+                "[ITEM] offer_id=%s pcode=%s parts_url=%s",
+                row.offer_id,
+                pcode,
+                "yes" if parts_url else "no",
+            )
 
             try:
                 snapshot = supplier.fetch_product_snapshot(pcode=pcode, parts_url=parts_url)
@@ -119,16 +144,24 @@ def main() -> None:
                     height_mm=int(row.height_mm),
                     weight_g=int(row.weight_g),
                 )
+
                 res = calculate_ozon_price(
                     inp=inp,
                     dims=dims,
                     commission_percent=float(row.commission_fbs_percent),
                 )
                 products_repo.update_ozon_price_calc(row.offer_id, res.final_price)
+
                 done += 1
+
             except Exception as e:
                 failed += 1
-                supplier.log.exception("[FAIL] offer_id=%s pcode=%s: %s", row.offer_id, pcode, e)
+                supplier.log.exception(
+                    "[FAIL] offer_id=%s pcode=%s: %s",
+                    row.offer_id,
+                    pcode,
+                    e,
+                )
 
     print(f"Supplier sync done={done}, skipped={skipped}, failed={failed}")
     con.close()
