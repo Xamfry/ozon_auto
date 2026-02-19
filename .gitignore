@@ -8,5 +8,5 @@ __pycache__/
 .env
 state_autorus.json
 /src/app/repositories
-/src/app/tests
+
 
