@@ -24,6 +24,15 @@ class Settings(BaseModel):
         "on",
     }
 
+    autorus_state_path: str = os.getenv("AUTORUS_STATE_PATH", "state_autorus.json").strip()
+    autorus_allow_autologin: bool = os.getenv("AUTORUS_ALLOW_AUTOLOGIN", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
     def validate_required(self) -> None:
         missing = []
         if not self.ozon_client_id:

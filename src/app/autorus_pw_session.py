@@ -45,6 +45,10 @@ class AutorusPwSession:
         if not state_file.exists():
             raise RuntimeError(f"Autorus: state-файл не найден: {state_file.resolve()}")
 
+        state_file = Path(self.state_path)
+        if not state_file.exists():
+            raise RuntimeError(f"Autorus: state-файл не найден: {state_file.resolve()}")
+
         self._p = sync_playwright().start()
         self._browser = self._p.chromium.launch(headless=self.headless)
         self._context = self._browser.new_context(
