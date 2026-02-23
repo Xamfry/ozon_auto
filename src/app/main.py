@@ -8,6 +8,7 @@ from .ozon_client import OzonClient
 from .pricing import DimensionsMM, PriceInput, calculate_ozon_price
 from .repositories.ozon_details import OzonDetailsRepo, OzonProductDetails
 from .repositories.ozon_products import OzonProductsRepo
+from .ozon_updates import push_prices_to_ozon, push_stocks_to_ozon
 
 
 def chunked(seq: list[str], size: int) -> list[list[str]]:
@@ -164,6 +165,13 @@ def main() -> None:
                 )
 
     print(f"Supplier sync done={done}, skipped={skipped}, failed={failed}")
+    
+    # 3) Push updates to Ozon
+    push_prices_to_ozon(con)
+    push_stocks_to_ozon(con)
+    
+    
+    
     con.close()
 
 
