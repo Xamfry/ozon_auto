@@ -9,4 +9,4 @@ __pycache__/
 state_autorus.json
 /src/app/repositories
 /data/autorus_profile
-
+.vscode
