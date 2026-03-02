@@ -10,7 +10,6 @@ from .ozon_client import OzonClient
 
 
 def _extract_warehouses(resp: Any) -> list[dict]:
-    """Ozon обычно возвращает {"result": [...]} для /v1/warehouse/list."""
     if isinstance(resp, dict):
         result = resp.get("result")
         if isinstance(result, list):
@@ -22,10 +21,7 @@ def _extract_warehouses(resp: Any) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Получить список складов из Ozon Seller API (/v1/warehouse/list) "
-            "и сохранить его в JSON."
-        )
+        description="Сохранить список складов Ozon (/v1/warehouse/list) в JSON."
     )
     parser.add_argument(
         "--out",
@@ -35,7 +31,7 @@ def main() -> None:
     parser.add_argument(
         "--pretty",
         action="store_true",
-        help="Сохранять JSON с отступами (читаемо).",
+        help="Сохранять JSON с отступами.",
     )
     args = parser.parse_args()
 
@@ -45,7 +41,6 @@ def main() -> None:
 
     oz = OzonClient()
     try:
-        # В запросе параметры не обязательны.
         resp = oz._post("/v1/warehouse/list", {})
     finally:
         oz.close()
@@ -53,30 +48,17 @@ def main() -> None:
     warehouses = _extract_warehouses(resp)
 
     payload = {
-        "raw": resp,  # сохраняем полный ответ, чтобы ничего не потерять
+        "raw": resp,
         "warehouses": warehouses,
         "count": len(warehouses),
     }
 
-    if args.pretty:
-        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    else:
-        out_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2 if args.pretty else None),
+        encoding="utf-8",
+    )
 
     log.info("[OZON][WAREHOUSE] saved=%s count=%s", str(out_path), len(warehouses))
-
-    # Короткий вывод в консоль: id + название + адрес (если есть)
-    for w in warehouses:
-        wid = w.get("warehouse_id") or w.get("id")
-        name = w.get("name") or w.get("title") or ""
-        addr = (
-            w.get("address")
-            or w.get("address_full")
-            or w.get("full_address")
-            or w.get("place")
-            or ""
-        )
-        log.info("[OZON][WAREHOUSE] id=%s name=%s addr=%s", wid, name, addr)
 
 
 if __name__ == "__main__":

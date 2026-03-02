@@ -235,16 +235,51 @@ class AutorusPwSession:
         brand = self._text(soup.select_one(".article-brand")) or None
         number = self._text(soup.select_one(".article-number")) or None
 
-        block = soup.select_one(".distrInfoBlockWrapper")
-        if not block:
+        blocks = soup.select(".distrInfoBlockWrapper")
+        if not blocks:
             self._save_debug("parts_no_offers.html", html)
             return brand, number, None
 
+        def _deadline_text(b) -> str:
+            # Важно: сначала проверяем, что доставка именно "На складе".
+            return self._text(b.select_one(".distrInfoDeadline"))
+
+        def _is_in_stock(b) -> bool:
+            return "на складе" in _deadline_text(b).lower()
+
+        def _qty(b) -> int:
+            return self._parse_int(self._text(b.select_one(".distrInfoAvailability .fr-text-nowrap")))
+
+        def _price(b) -> float:
+            return self._parse_price(self._text(b.select_one(".distrInfoPrice")))
+
+        def _warehouse(b) -> str:
+            return self._text(b.select_one(".distrInfoRoute .fr-text-nowrap"))
+
+        # У поставщика может быть 1 или 2 wrapper.
+        # Правило:
+        # - учитываем только wrapper, где deadline содержит "На складе";
+        # - если таких нет: qty=0;
+        # - если есть: берём max(qty);
+        # - если итоговое qty < 5: qty=0.
+        in_stock_blocks = [b for b in blocks[:2] if _is_in_stock(b)]
+
+        chosen_block = None
+        chosen_qty_raw = 0
+        if in_stock_blocks:
+            chosen_block = max(in_stock_blocks, key=_qty)
+            chosen_qty_raw = _qty(chosen_block)
+        else:
+            chosen_block = blocks[0]
+            chosen_qty_raw = 0
+
+        final_qty = 0 if chosen_qty_raw < 5 else chosen_qty_raw
+
         offer = AutorusOffer(
-            warehouse=self._text(block.select_one(".distrInfoRoute .fr-text-nowrap")),
-            qty=self._parse_int(self._text(block.select_one(".distrInfoAvailability .fr-text-nowrap"))),
-            price_rub=self._parse_price(self._text(block.select_one(".distrInfoPrice"))),
-            deadline=self._text(block.select_one(".distrInfoDeadline div:nth-of-type(2)")),
+            warehouse=_warehouse(chosen_block),
+            qty=int(final_qty),
+            price_rub=float(_price(chosen_block)),
+            deadline=_deadline_text(chosen_block),
         )
         return brand, number, offer
 

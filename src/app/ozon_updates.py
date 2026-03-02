@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Sequence
 
 import sqlite3
@@ -15,7 +17,8 @@ from .ozon_client import OzonClient
 class PriceUpdateItem:
     offer_id: str
     product_id: int
-    price: int
+    price_rub: int
+    qty: int
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,7 @@ class StockUpdateItem:
     product_id: int
     stock: int
     warehouse_id: int
+    price_rub: int
 
 
 def _chunked(seq: Sequence, size: int) -> list[list]:
@@ -58,14 +62,29 @@ class _RateLimiter:
             time.sleep(max(0.0, 60 - elapsed) + 0.05)
 
 
-class OzonUpdater(OzonClient):
-    """
-    Обновление цен/остатков.
+def _get_update_logger() -> logging.Logger:
+    """Лог обновлений Ozon в data/update.log."""
+    Path("data").mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("ozon_update")
+    logger.setLevel(logging.INFO)
 
-    Используем:
-    - POST /v1/product/import/prices (до 1000 товаров за запрос)
-    - POST /v2/products/stocks       (до 100 товаров за запрос)
-    """
+    fmt = logging.Formatter(
+        "[%(asctime)s] [update] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    if not logger.handlers:
+        fh = logging.FileHandler("data/update.log", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+        logger.propagate = False
+
+    return logger
+
+
+class OzonUpdater(OzonClient):
+    """Методы обновления цен/остатков."""
 
     def import_prices(self, items: list[PriceUpdateItem]) -> dict:
         if not items:
@@ -78,7 +97,7 @@ class OzonUpdater(OzonClient):
                 {
                     "offer_id": it.offer_id,
                     "product_id": it.product_id,
-                    "price": str(int(it.price)),
+                    "price": str(int(it.price_rub)),
                     "old_price": "0",
                     "min_price": "0",
                     "auto_action_enabled": "UNKNOWN",
@@ -109,14 +128,17 @@ class OzonUpdater(OzonClient):
         return self._post("/v2/products/stocks", payload)
 
 
+def _env_warehouse_id() -> int:
+    raw = (os.getenv("OZON_WAREHOUSE_ID") or os.getenv("warehouse_id") or "").strip()
+    if not raw:
+        raise RuntimeError("warehouse_id not set. Set OZON_WAREHOUSE_ID in .env")
+    return int(raw)
+
+
 def collect_price_updates(con: sqlite3.Connection) -> list[PriceUpdateItem]:
-    """
-    Берём ozon_price_calc и сравниваем с price_current.
-    Если одинаково — не отправляем (экономим лимиты).
-    """
     cur = con.execute(
         """
-        SELECT offer_id, product_id, price_current, ozon_price_calc
+        SELECT offer_id, product_id, price_current, ozon_price_calc, COALESCE(supplier_qty, 0) AS supplier_qty
         FROM ozon_products
         WHERE
             archived = 0
@@ -128,7 +150,7 @@ def collect_price_updates(con: sqlite3.Connection) -> list[PriceUpdateItem]:
     )
 
     out: list[PriceUpdateItem] = []
-    for offer_id, product_id, price_current, ozon_price_calc in cur.fetchall():
+    for offer_id, product_id, price_current, ozon_price_calc, supplier_qty in cur.fetchall():
         try:
             new_price = int(ozon_price_calc)
         except Exception:
@@ -145,36 +167,32 @@ def collect_price_updates(con: sqlite3.Connection) -> list[PriceUpdateItem]:
             PriceUpdateItem(
                 offer_id=str(offer_id),
                 product_id=int(product_id),
-                price=new_price,
+                price_rub=new_price,
+                qty=int(supplier_qty or 0),
             )
         )
     return out
 
 
-def collect_stock_updates(
-    con: sqlite3.Connection,
-    *,
-    warehouse_id: int,
-) -> list[StockUpdateItem]:
+def collect_stock_updates(con: sqlite3.Connection, *, warehouse_id: int) -> list[StockUpdateItem]:
     cur = con.execute(
         """
-        SELECT offer_id, product_id, supplier_qty
+        SELECT offer_id, product_id, COALESCE(supplier_qty, 0) AS supplier_qty, COALESCE(ozon_price_calc, 0) AS ozon_price_calc
         FROM ozon_products
         WHERE
             archived = 0
             AND moderate_status = 'approved'
-            AND supplier_qty IS NOT NULL
             AND product_id IS NOT NULL
         ORDER BY offer_id;
         """
     )
 
     out: list[StockUpdateItem] = []
-    for offer_id, product_id, supplier_qty in cur.fetchall():
+    for offer_id, product_id, supplier_qty, ozon_price_calc in cur.fetchall():
         try:
             qty = int(supplier_qty)
         except Exception:
-            continue
+            qty = 0
 
         qty = max(0, qty)
 
@@ -184,6 +202,7 @@ def collect_stock_updates(
                 product_id=int(product_id),
                 stock=qty,
                 warehouse_id=int(warehouse_id),
+                price_rub=int(ozon_price_calc or 0),
             )
         )
     return out
@@ -193,10 +212,10 @@ def push_prices_to_ozon(
     con: sqlite3.Connection,
     *,
     max_items_per_minute: int = 10_000,
-    dry_run: bool = False,
 ) -> None:
-    """Цены: батчи по 1000, троттлинг по items/min."""
     log = setup_logging()
+    ulog = _get_update_logger()
+
     items = collect_price_updates(con)
     if not items:
         log.info("[OZON][PRICE] nothing to update")
@@ -204,37 +223,25 @@ def push_prices_to_ozon(
 
     log.info("[OZON][PRICE] items=%s", len(items))
     batches = _chunked(items, 1000)
-
     limiter = _RateLimiter(max_items_per_minute=max_items_per_minute)
+
     oz = OzonUpdater()
     try:
-        ok = 0
-        bad = 0
-
         for batch_idx, batch in enumerate(batches, start=1):
             limiter.acquire(len(batch))
-
-            if dry_run:
-                log.info("[OZON][PRICE] DRY_RUN batch=%s size=%s", batch_idx, len(batch))
-                continue
-
-            try:
-                resp = oz.import_prices(batch)
-            except Exception as e:
-                log.exception("[OZON][PRICE] batch=%s failed: %s", batch_idx, e)
-                bad += len(batch)
-                continue
+            resp = oz.import_prices(batch)
 
             for r in (resp.get("result") or []):
                 if r.get("updated") is True and not (r.get("errors") or []):
-                    ok += 1
+                    # пишем в update.log только то, что реально обновили
+                    offer_id = str(r.get("offer_id") or "")
+                    it = next((x for x in batch if x.offer_id == offer_id), None)
+                    if it:
+                        ulog.info(f"[{it.offer_id}] [{it.price_rub}] [{it.qty}]")
                 else:
-                    bad += 1
                     log.warning("[OZON][PRICE][ITEM] %s", r)
 
-            log.info("[OZON][PRICE] batch=%s/%s ok=%s bad=%s", batch_idx, len(batches), ok, bad)
-
-        log.info("[OZON][PRICE] done ok=%s bad=%s", ok, bad)
+            log.info("[OZON][PRICE] batch=%s/%s", batch_idx, len(batches))
     finally:
         oz.close()
 
@@ -244,24 +251,12 @@ def push_stocks_to_ozon(
     *,
     warehouse_id: Optional[int] = None,
     max_items_per_minute: int = 8_000,
-    dry_run: bool = False,
 ) -> None:
-    """
-    Остатки: батчи по 100.
-
-    В API есть ограничение: максимум 80 запросов в минуту,
-    то есть максимум 8000 товаров/мин при batch_size=100.
-    """
     log = setup_logging()
+    ulog = _get_update_logger()
 
     if warehouse_id is None:
-        env = (os.getenv("warehouse_id") or "").strip()
-        if not env:
-            raise RuntimeError(
-                "warehouse_id is required. "
-                "Pass warehouse_id=... or set warehouse_id env var."
-            )
-        warehouse_id = int(env)
+        warehouse_id = _env_warehouse_id()
 
     items = collect_stock_updates(con, warehouse_id=int(warehouse_id))
     if not items:
@@ -270,36 +265,23 @@ def push_stocks_to_ozon(
 
     log.info("[OZON][STOCK] items=%s warehouse_id=%s", len(items), warehouse_id)
     batches = _chunked(items, 100)
-
     limiter = _RateLimiter(max_items_per_minute=max_items_per_minute)
+
     oz = OzonUpdater()
     try:
-        ok = 0
-        bad = 0
-
         for batch_idx, batch in enumerate(batches, start=1):
             limiter.acquire(len(batch))
-
-            if dry_run:
-                log.info("[OZON][STOCK] DRY_RUN batch=%s size=%s", batch_idx, len(batch))
-                continue
-
-            try:
-                resp = oz.update_stocks(batch)
-            except Exception as e:
-                log.exception("[OZON][STOCK] batch=%s failed: %s", batch_idx, e)
-                bad += len(batch)
-                continue
+            resp = oz.update_stocks(batch)
 
             for r in (resp.get("result") or []):
                 if r.get("updated") is True and not (r.get("errors") or []):
-                    ok += 1
+                    offer_id = str(r.get("offer_id") or "")
+                    it = next((x for x in batch if x.offer_id == offer_id), None)
+                    if it:
+                        ulog.info(f"[{it.offer_id}] [{it.price_rub}] [{it.stock}]")
                 else:
-                    bad += 1
                     log.warning("[OZON][STOCK][ITEM] %s", r)
 
-            log.info("[OZON][STOCK] batch=%s/%s ok=%s bad=%s", batch_idx, len(batches), ok, bad)
-
-        log.info("[OZON][STOCK] done ok=%s bad=%s", ok, bad)
+            log.info("[OZON][STOCK] batch=%s/%s", batch_idx, len(batches))
     finally:
         oz.close()
