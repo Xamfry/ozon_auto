@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote, urljoin
 
 from bs4 import BeautifulSoup
@@ -51,20 +53,18 @@ class AutorusPwSession:
         self.log = setup_logging()
         self.delay_min = 0.8
         self.delay_max = 1.5
+        self.min_autorus_quant = 5
+        
 
     def __enter__(self) -> "AutorusPwSession":
         Path(self.profile_dir).mkdir(parents=True, exist_ok=True)
 
         self._p = sync_playwright().start()
-
-        # Важно: persistent profile
         self._context = self._p.chromium.launch_persistent_context(
             user_data_dir=self.profile_dir,
             headless=self.headless,
             locale="ru-RU",
-            args=[
-                "--disable-blink-features=AutomationControlled",
-            ],
+            args=["--disable-blink-features=AutomationControlled"],
         )
 
         self._page = self._context.new_page()
@@ -88,8 +88,7 @@ class AutorusPwSession:
 
     def _save_debug(self, name: str, html: str) -> None:
         Path("data/debug").mkdir(parents=True, exist_ok=True)
-        with open(f"data/debug/{name}", "w", encoding="utf-8") as f:
-            f.write(html)
+        (Path("data/debug") / name).write_text(html, encoding="utf-8")
 
     def is_guest_mode(self) -> bool:
         try:
@@ -101,11 +100,6 @@ class AutorusPwSession:
     @staticmethod
     def _text(el) -> str:
         return " ".join(el.get_text(" ", strip=True).split()) if el else ""
-
-    @staticmethod
-    def _parse_int(s: str) -> int:
-        digits = "".join(ch for ch in (s or "") if ch.isdigit())
-        return int(digits) if digits else 0
 
     @staticmethod
     def _parse_price(s: str) -> float:
@@ -215,6 +209,45 @@ class AutorusPwSession:
             raise RuntimeError(f"Autorus: failed to resolve pcode={pcode}: {last_error}") from last_error
         raise RuntimeError(f"Autorus: failed to resolve pcode={pcode}")
 
+    @staticmethod
+    def _is_delivery_days_text(text_lower: str) -> bool:
+        # Признаки срока доставки, а не остатка.
+        return any(x in text_lower for x in ("дн", "дня", "дней", "день", "срок", "поставк"))
+
+    @staticmethod
+    def _parse_qty_from_wrapper(wrapper_text: str) -> int:
+        """
+        Безопасный парсер количества:
+        1) приоритет "N шт/штук/ед"
+        2) если похоже на срок доставки (дней/дня/дн) — не считаем это остатком
+        3) фолбек: max число в тексте
+        """
+        t = (wrapper_text or "").strip()
+        tl = t.lower()
+
+        # 1) Явные единицы количества
+        qty_candidates: list[int] = []
+        for m in re.finditer(r"(\d+)\s*(шт\.?|штук|ед\.?|единиц)", tl):
+            try:
+                qty_candidates.append(int(m.group(1)))
+            except Exception:
+                pass
+        if qty_candidates:
+            return max(qty_candidates)
+
+        # 2) Если текст похож на срок доставки — не остаток
+        if AutorusPwSession._is_delivery_days_text(tl):
+            return 0
+
+        # 3) Фолбек: любое число (берём максимум)
+        nums: list[int] = []
+        for m in re.finditer(r"\d+", tl):
+            try:
+                nums.append(int(m.group(0)))
+            except Exception:
+                pass
+        return max(nums) if nums else 0
+
     def _fetch_first_offer_from_parts(self, parts_url: str) -> tuple[str | None, str | None, AutorusOffer | None]:
         self.log.info("[SUPPLIER] parts=%s", parts_url)
 
@@ -225,7 +258,8 @@ class AutorusPwSession:
         try:
             self.page.wait_for_selector(".distrInfoBlockWrapper, .article-brand, .article-number", timeout=120_000)
         except PWTimeoutError as e:
-            self._save_debug("parts_timeout.html", self.page.content())
+            html = self.page.content()
+            self._save_debug("parts_timeout.html", html)
             self.page.screenshot(path="data/debug/parts_timeout.png", full_page=True)
             raise RuntimeError("Autorus: timeout on /parts page.") from e
 
@@ -236,50 +270,70 @@ class AutorusPwSession:
         number = self._text(soup.select_one(".article-number")) or None
 
         blocks = soup.select(".distrInfoBlockWrapper")
-        if not blocks:
-            self._save_debug("parts_no_offers.html", html)
-            return brand, number, None
 
-        def _deadline_text(b) -> str:
-            # Важно: сначала проверяем, что доставка именно "На складе".
+        # NEW: если wrapper'ов нет — остатки 0 (и возвращаем offer, чтобы пайплайн обнулил БД + Ozon)
+        if not blocks:
+            self._save_debug("parts_no_wrappers.html", html)
+
+            # Цена (если есть) — для совместимости (чтобы не ломать расчёты).
+            price_el = soup.select_one(".distrInfoPrice")
+            price_any = self._parse_price(self._text(price_el))
+
+            if price_any <= 0:
+                # очень мягкий фолбек
+                price_any = self._parse_price(self._text(soup.select_one('[class*="Price"], [class*="price"]')))
+
+            offer = AutorusOffer(
+                warehouse="",
+                qty=0,
+                price_rub=float(price_any or 0.0),
+                deadline="",
+            )
+            return brand, number, offer
+
+        def deadline_text(b) -> str:
             return self._text(b.select_one(".distrInfoDeadline"))
 
-        def _is_in_stock(b) -> bool:
-            return "на складе" in _deadline_text(b).lower()
+        def is_in_stock(b) -> bool:
+            return "на складе" in deadline_text(b).lower()
 
-        def _qty(b) -> int:
-            return self._parse_int(self._text(b.select_one(".distrInfoAvailability .fr-text-nowrap")))
+        def wrapper_text(b) -> str:
+            # Берём availability, иначе весь wrapper
+            node = b.select_one(".distrInfoAvailability") or b
+            return self._text(node)
 
-        def _price(b) -> float:
+        def qty(b) -> int:
+            return self._parse_qty_from_wrapper(wrapper_text(b))
+
+        def price(b) -> float:
             return self._parse_price(self._text(b.select_one(".distrInfoPrice")))
 
-        def _warehouse(b) -> str:
+        def warehouse(b) -> str:
             return self._text(b.select_one(".distrInfoRoute .fr-text-nowrap"))
 
-        # У поставщика может быть 1 или 2 wrapper.
-        # Правило:
-        # - учитываем только wrapper, где deadline содержит "На складе";
-        # - если таких нет: qty=0;
-        # - если есть: берём max(qty);
-        # - если итоговое qty < 5: qty=0.
-        in_stock_blocks = [b for b in blocks[:2] if _is_in_stock(b)]
+        # Учитываем максимум два блока.
+        blocks2 = blocks[:2]
 
-        chosen_block = None
-        chosen_qty_raw = 0
-        if in_stock_blocks:
-            chosen_block = max(in_stock_blocks, key=_qty)
-            chosen_qty_raw = _qty(chosen_block)
-        else:
-            chosen_block = blocks[0]
+        # Сначала фильтр "На складе"
+        in_stock_blocks = [b for b in blocks2 if is_in_stock(b)]
+
+        # Если нигде не "На складе" -> qty=0
+        if not in_stock_blocks:
+            chosen_block = blocks2[0]
             chosen_qty_raw = 0
+        else:
+            # Если на одном или обоих "На складе" -> берём блок с max qty
+            chosen_block = max(in_stock_blocks, key=qty)
+            chosen_qty_raw = qty(chosen_block)
 
-        final_qty = 0 if chosen_qty_raw < 5 else chosen_qty_raw
+        # Порог <5 => 0
+        final_qty = 0 if chosen_qty_raw < self.min_autorus_quant else chosen_qty_raw
 
         offer = AutorusOffer(
-            warehouse=_warehouse(chosen_block),
+            warehouse=warehouse(chosen_block),
             qty=int(final_qty),
-            price_rub=float(_price(chosen_block)),
-            deadline=_deadline_text(chosen_block),
+            price_rub=float(price(chosen_block)),
+            deadline=deadline_text(chosen_block),
         )
         return brand, number, offer
 
