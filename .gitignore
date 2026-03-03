@@ -10,3 +10,4 @@ state_autorus.json
 /src/app/repositories
 /data/autorus_profile
 .vscode
+price_calc_gui.exe
