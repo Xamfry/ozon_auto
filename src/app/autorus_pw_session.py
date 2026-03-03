@@ -51,8 +51,8 @@ class AutorusPwSession:
         self._page = None
 
         self.log = setup_logging()
-        self.delay_min = 0.5
-        self.delay_max = 1
+        self.delay_min = 0.7
+        self.delay_max = 1.4
         self.min_autorus_quant = 5
         
 
