@@ -51,8 +51,8 @@ class AutorusPwSession:
         self._page = None
 
         self.log = setup_logging()
-        self.delay_min = 0.8
-        self.delay_max = 1.5
+        self.delay_min = 0.3
+        self.delay_max = 0.8
         self.min_autorus_quant = 5
         
 
@@ -212,7 +212,7 @@ class AutorusPwSession:
     @staticmethod
     def _is_delivery_days_text(text_lower: str) -> bool:
         # Признаки срока доставки, а не остатка.
-        return any(x in text_lower for x in ("дн", "дня", "дней", "день", "срок", "поставк"))
+        return any(x in text_lower for x in ("дн", "дня", "дней", "день", "срок", "поставк", "от", "до", "часов", "час", "часа"))
 
     @staticmethod
     def _parse_qty_from_wrapper(wrapper_text: str) -> int:
