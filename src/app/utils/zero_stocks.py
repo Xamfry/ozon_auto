@@ -5,8 +5,8 @@ import time
 import sqlite3
 from typing import List
 
-from .logging_setup import setup_logging
-from .ozon_client import OzonClient
+from ..logging_setup import setup_logging
+from ..ozon_client import OzonClient
 
 
 BATCH_SIZE = 100

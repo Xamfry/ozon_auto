@@ -152,6 +152,15 @@ def collect_price_updates(con: sqlite3.Connection) -> list[PriceUpdateItem]:
     out: list[PriceUpdateItem] = []
     for offer_id, product_id, price_current, ozon_price_calc, supplier_qty in cur.fetchall():
         try:
+            qty = int(supplier_qty or 0)
+        except Exception:
+            qty = 0
+
+        # NEW: если остаток 0 — цену не трогаем
+        if qty <= 0:
+            continue
+
+        try:
             new_price = int(ozon_price_calc)
         except Exception:
             continue
@@ -168,7 +177,7 @@ def collect_price_updates(con: sqlite3.Connection) -> list[PriceUpdateItem]:
                 offer_id=str(offer_id),
                 product_id=int(product_id),
                 price_rub=new_price,
-                qty=int(supplier_qty or 0),
+                qty=qty,
             )
         )
     return out
