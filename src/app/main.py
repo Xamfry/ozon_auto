@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import tempfile
 from datetime import datetime, timezone, timedelta
+import time
 
 from .autorus_pw_session import AutorusPwSession
 from .db import connect, init_db
@@ -22,6 +23,23 @@ def chunked(seq: list[str], size: int) -> list[list[str]]:
 def _has_dimensions(row) -> bool:
     return bool(row.length_mm and row.width_mm and row.height_mm and row.weight_g)
 
+def get_sale_stats_after_push(approved_offer_ids: list[str]) -> tuple[int, int]:
+    """
+    selling = сколько реально продаётся (есть FBS-остатки)
+    ready   = сколько готово к продаже (approved и не архив)
+    """
+    oz = OzonClient()
+    try:
+        items = oz.list_products_all(include_archived=False, visibility="ALL")
+        has_fbs_by_offer = {p.offer_id: bool(p.has_fbs_stocks) for p in items}
+
+        ready = len(approved_offer_ids)
+        selling = sum(1 for oid in approved_offer_ids if has_fbs_by_offer.get(oid, False))
+
+        return selling, ready
+    finally:
+        oz.close()
+
 
 def main() -> None:
     con = connect()
@@ -35,7 +53,6 @@ def main() -> None:
         tg.send_message(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Start tg stage 1: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     except Exception:
-        # телеграм не должен ломать основной процесс
         print(f"Failed stage 1 to Telegram")
 
     warehouse_id = None
@@ -255,7 +272,21 @@ def main() -> None:
             except Exception:
                 pass
 
-    # отдельное сообщение не шлём, чтобы не дублировать п3
+    # 4) Пауза и статистика "продаются / готовы"
+    print(f"Pause 10 seconds")
+    for _ in range(1, 11):
+        print(f"sleep {_} ...")
+        time.sleep(1)
+    
+    try:
+        selling, ready = get_sale_stats_after_push(approved_offer_ids)
+        msg4 = f"Ozon stats: \n \
+            В продаже={selling}, \n \
+            готовы к продаже={ready-selling}"
+        print(msg4)
+        tg.send_message(msg4)
+    except Exception as e:
+        print(f"Stage 4 failed: {e!r}")
 
     con.close()
 
