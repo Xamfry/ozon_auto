@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import tempfile
+from datetime import datetime, timezone, timedelta
 
 from .autorus_pw_session import AutorusPwSession
 from .db import connect, init_db
@@ -9,6 +12,7 @@ from .ozon_updates import push_prices_to_ozon, push_stocks_to_ozon
 from .pricing import DimensionsMM, PriceInput, calculate_ozon_price
 from .repositories.ozon_details import OzonDetailsRepo, OzonProductDetails
 from .repositories.ozon_products import OzonProductsRepo
+from .utils.telegram import TelegramNotifier
 
 
 def chunked(seq: list[str], size: int) -> list[list[str]]:
@@ -25,6 +29,22 @@ def main() -> None:
 
     products_repo = OzonProductsRepo(con)
     details_repo = OzonDetailsRepo(con)
+
+    tg = TelegramNotifier()
+    try:
+        tg.send_message(f"Start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Start tg stage 1: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    except Exception:
+        # телеграм не должен ломать основной процесс
+        print(f"Failed stage 1 to Telegram")
+
+    warehouse_id = None
+    raw_wh = (os.getenv("OZON_WAREHOUSE_ID") or os.getenv("warehouse_id") or "").strip()
+    if raw_wh:
+        try:
+            warehouse_id = int(raw_wh)
+        except Exception:
+            warehouse_id = None
 
     # 1) Ozon sync
     oz = OzonClient()
@@ -71,10 +91,21 @@ def main() -> None:
     # 2) Supplier + pricing
     rows = products_repo.list_for_supplier_sync()
     print(f"Supplier sync candidates: {len(rows)}")
+    try:
+        tg.send_message(
+            "Ozon: non-archived={0}\nOzon: approved in DB={1}\nOzon: details saved={2}\nSupplier sync candidates: {3}".format(
+                len(base_list), len(approved), len(details), len(rows)
+            )
+        )
+        print(f"Start tg stage 2: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    except Exception:
+        print(f"Failed stage 2 to Telegram")
+
 
     done = 0
     skipped = 0
     failed = 0
+    done_offer_ids: list[str] = []
 
     profile_dir = "data/autorus_profile"
     if not Path(profile_dir).exists():
@@ -154,6 +185,7 @@ def main() -> None:
                 products_repo.update_ozon_price_calc(row.offer_id, res.final_price)
 
                 done += 1
+                done_offer_ids.append(row.offer_id)
 
             except Exception as e:
                 failed += 1
@@ -168,7 +200,63 @@ def main() -> None:
     push_prices_to_ozon(con)
     push_stocks_to_ozon(con)
 
-    print(f"Supplier sync done={done}, skipped={skipped}, failed={failed}")
+    msg3 = f"Supplier sync done={done}, skipped={skipped}, failed={failed}"
+    print(msg3)
+
+    # Дополнение к п3: дамп обновлённых товаров в .txt и отправка в Telegram
+    tmp_path = None
+    try:
+        wh = warehouse_id if warehouse_id is not None else 0
+        MSK = timezone(timedelta(hours=3))
+        ts = datetime.now(MSK).strftime("%d-%m-%Y_%H-%M-%S")
+        fname = f"autorus_bot_{ts}_{wh}.txt"
+
+        # ВАЖНО: в сам файл НЕ пишем строку Supplier sync done=...
+        # Она уходит как текст (caption) вместе с вложенным .txt
+        lines: list[str] = []
+        if done_offer_ids:
+            placeholders = ",".join(["?"] * len(done_offer_ids))
+            cur = con.execute(
+                f"""
+                SELECT offer_id, COALESCE(supplier_price_rub, 0), COALESCE(supplier_qty, 0), COALESCE(ozon_price_calc, 0)
+                FROM ozon_products
+                WHERE offer_id IN ({placeholders})
+                ORDER BY offer_id
+                """,
+                done_offer_ids,
+            )
+            for offer_id, sup_price, sup_qty, oz_price in cur.fetchall():
+                lines.append(f"[{offer_id}] supplier_price={sup_price} qty={sup_qty} ozon_price={oz_price}")
+        else:
+            lines.append("No updated items.")
+
+        tmp_dir = Path(tempfile.gettempdir())
+        tmp_file = tmp_dir / fname  # fname уже "ДД-ММ-ГГГГ_ЧЧ-ММ-СС_{wh}.txt"
+        tmp_path = str(tmp_file)
+
+        tmp_file.write_text("\n".join(lines), encoding="utf-8")
+
+        # Отправляем файл + текст одним сообщением
+        tg.send_document(tmp_path, caption=msg3)
+        print(f"Sent Telegram stage 3 with document: {tmp_path}")
+    except Exception as e:
+        print(f"Stage 3: send_document failed: {e!r}")
+        # если файл не ушёл — хотя бы текст пункта 3
+        try:
+            tg.send_message(msg3)
+            print(f"Sent Telegram stage 3 without document")
+        except Exception as e2:
+            print(f"Stage 3: send_message failed: {e2!r}")
+
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    # отдельное сообщение не шлём, чтобы не дублировать п3
+
     con.close()
 
 
