@@ -281,6 +281,7 @@ def main() -> None:
     try:
         selling, ready = get_sale_stats_after_push(approved_offer_ids)
         msg4 = f"Ozon stats: \n \
+            Всего товаров={ready} \n \
             В продаже={selling}, \n \
             готовы к продаже={ready-selling}"
         print(msg4)
