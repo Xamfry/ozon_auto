@@ -7,7 +7,7 @@ from typing import List
 
 from ..logging_setup import setup_logging
 from ..ozon_client import OzonClient
-
+from .telegram import TelegramNotifier
 
 BATCH_SIZE = 100
 MAX_ITEMS_PER_MINUTE = 8_000
@@ -41,6 +41,7 @@ def _chunked(seq: List[dict], size: int) -> List[List[dict]]:
 
 
 def main() -> None:
+    tg = TelegramNotifier()
     log = setup_logging()
 
     warehouse_id = (
@@ -129,6 +130,13 @@ def main() -> None:
             "[OZON][ZERO_STOCK] Завершено ok=%s bad=%s",
             total_ok, total_bad
         )
+        tg.send_message(
+            f"Обнуление остатков завершено\n"
+            f"Всего товаров: {len(items)}\n"
+            f"Успешно: {total_ok}\n"
+            f"С ошибками: {total_bad}"
+        )
+        print(f"Обнуление остатков завершено\nСообщение отправлено")
 
     finally:
         oz.close()
