@@ -314,7 +314,7 @@ def main() -> None:
 
     # 4) Пауза и статистика "продаются / готовы"
     print(f"Pause 10 seconds")
-    for _ in range(1, 11):
+    for _ in range(1, 16):
         print(f"sleep {_} ...")
         time.sleep(1)
     
