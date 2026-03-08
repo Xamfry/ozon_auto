@@ -23,20 +23,60 @@ def chunked(seq: list[str], size: int) -> list[list[str]]:
 def _has_dimensions(row) -> bool:
     return bool(row.length_mm and row.width_mm and row.height_mm and row.weight_g)
 
-def get_sale_stats_after_push(approved_offer_ids: list[str]) -> tuple[int, int]:
-    """
-    selling = сколько реально продаётся (есть FBS-остатки)
-    ready   = сколько готово к продаже (approved и не архив)
-    """
+
+def _fetch_offer_ids_by_visibility(oz: OzonClient, visibility: str) -> set[str]:
+    offer_ids: set[str] = set()
+    last_id = ""
+
+    while True:
+        resp = oz._post(
+            "/v3/product/list",
+            {
+                "filter": {"visibility": visibility},
+                "limit": 1000,
+                "last_id": last_id,
+            },
+        )
+        result = resp.get("result") or {}
+        items = result.get("items") or []
+        last_id = result.get("last_id") or ""
+
+        for item in items:
+            offer_id = str(item.get("offer_id") or "").strip()
+            if offer_id:
+                offer_ids.add(offer_id)
+
+        if not last_id:
+            break
+
+    return offer_ids
+
+
+def get_sale_stats_after_push() -> dict[str, int]:
     oz = OzonClient()
     try:
-        items = oz.list_products_all(include_archived=False, visibility="ALL")
-        has_fbs_by_offer = {p.offer_id: bool(p.has_fbs_stocks) for p in items}
+        all_ids = _fetch_offer_ids_by_visibility(oz, "ALL")
+        selling_ids = _fetch_offer_ids_by_visibility(oz, "IN_SALE")
+        ready_ids = _fetch_offer_ids_by_visibility(oz, "EMPTY_STOCK")
 
-        ready = len(approved_offer_ids)
-        selling = sum(1 for oid in approved_offer_ids if has_fbs_by_offer.get(oid, False))
+        failed_ids = _fetch_offer_ids_by_visibility(oz, "STATE_FAILED")
+        validation_failed_ids = _fetch_offer_ids_by_visibility(oz, "VALIDATION_STATE_FAIL")
+        
+        revision_ids = _fetch_offer_ids_by_visibility(oz, "PARTIAL_APPROVED")
+        removed_ids = _fetch_offer_ids_by_visibility(oz, "REMOVED_FROM_SALE")
+        
+        archived_ids = _fetch_offer_ids_by_visibility(oz, "ARCHIVED")
 
-        return selling, ready
+        stats_cache = {
+            "all": len(all_ids | archived_ids),
+            "selling": len(selling_ids),
+            "ready": len(ready_ids),
+            "errors": len(failed_ids | validation_failed_ids),
+            "revision": len(revision_ids),
+            "removed": len(removed_ids),
+            "archived": len(archived_ids),
+        }
+        return stats_cache
     finally:
         oz.close()
 
@@ -279,11 +319,17 @@ def main() -> None:
         time.sleep(1)
     
     try:
-        selling, ready = get_sale_stats_after_push(approved_offer_ids)
-        msg4 = f"Ozon stats: \n \
-            Всего товаров={ready} \n \
-            В продаже={selling}, \n \
-            готовы к продаже={ready-selling}"
+        stats = get_sale_stats_after_push()
+        msg4 = (
+            f"Ozon stats:\n"
+            f"1) Все товары={stats['all']}\n"
+            f"2) В продаже={stats['selling']}\n"
+            f"3) Готовы к продаже={stats['ready']}\n"
+            f"4) Ошибки={stats['errors']}\n"
+            f"5) На доработку={stats['revision']}\n"
+            f"6) Сняты с продажи={stats['removed']}\n"
+            f"7) Архив={stats['archived']}"
+        )
         print(msg4)
         tg.send_message(msg4)
     except Exception as e:
