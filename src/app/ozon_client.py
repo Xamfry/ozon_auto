@@ -50,7 +50,7 @@ class OzonAttributesRow:
     offer_id: str
     name: Optional[str]
     weight_g: Optional[int]
-    length_mm: Optional[int]  # depth
+    length_mm: Optional[int]
     width_mm: Optional[int]
     height_mm: Optional[int]
     
@@ -86,11 +86,6 @@ class OzonClient:
 
     @staticmethod
     def _extract_dims_mm(item: dict) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
-        """
-        Ozon в разных методах/версиях может отдавать габариты под разными ключами.
-        Стараемся достать из нескольких вариантов.
-        Единицы чаще всего мм и граммы (в требованиях к карточкам у Ozon это типично). :contentReference[oaicite:1]{index=1}
-        """
         weight = None
         length = None
         width = None
@@ -126,7 +121,6 @@ class OzonClient:
         if r.status_code >= 400:
             raise OzonApiError(f"HTTP {r.status_code}: {r.text[:500]}")
         data = r.json()
-        # У Ozon часто ошибки лежат в json-структуре, даже при 200
         if isinstance(data, dict) and data.get("error"):
             raise OzonApiError(f"API error: {data.get('error')}")
         return data
@@ -150,10 +144,6 @@ class OzonClient:
         visibility: str = "ALL",
         limit: Optional[int] = None,
     ) -> List[OzonProductListItem]:
-        """
-        Получить все товары из /v3/product/list.
-        Чтобы исключить архив — фильтруем по полю 'archived' из ответа.
-        """
         page_limit = limit or settings.ozon_limit_per_page
         if page_limit < 1 or page_limit > 1000:
             raise ValueError("limit должен быть в диапазоне 1..1000")
@@ -187,7 +177,6 @@ class OzonClient:
                 if not include_archived and item.archived:
                     continue
                 if not item.offer_id:
-                    # offer_id бывает пустым на некоторых сущностях — пропускаем
                     continue
                 out.append(item)
 
@@ -242,10 +231,6 @@ class OzonClient:
         return out
     
     def get_attributes_by_offer_ids(self, offer_ids: list[str]) -> list[OzonAttributesRow]:
-        """
-        /v4/product/info/attributes
-        В твоём ответе структура: {"result":[...]} и поля height/depth/width/weight. :contentReference[oaicite:5]{index=5}
-        """
         if not offer_ids:
             return []
         if len(offer_ids) > 1000:
@@ -260,7 +245,6 @@ class OzonClient:
             unit_dim = it.get("dimension_unit")
             unit_w = it.get("weight_unit")
 
-            # ожидаем mm и g (как в твоём JSON) :contentReference[oaicite:6]{index=6}
             def to_int(v):
                 try:
                     return int(v) if v is not None else None
@@ -268,7 +252,7 @@ class OzonClient:
                     return None
 
             height = to_int(it.get("height"))
-            depth  = to_int(it.get("depth"))   # считаем как length_mm
+            depth  = to_int(it.get("depth"))
             width  = to_int(it.get("width"))
             weight = to_int(it.get("weight"))
 

@@ -10,14 +10,10 @@ class SupplierItem:
     article: str
     price: Optional[float]
     stock: Optional[int]
-    raw: Dict[str, Any]  # для отладки (что нашли)
+    raw: Dict[str, Any]
 
 
 class SupplierClient:
-    """
-    Вариант без API: Playwright + сохранённая сессия (storage_state).
-    """
-
     def __init__(self, state_path: str = "state_autorus.json", headless: bool = True) -> None:
         self.state_path = state_path
         self.headless = headless
@@ -69,18 +65,6 @@ class SupplierClient:
             return None
 
     def find_by_article(self, article: str) -> SupplierItem:
-        """
-        ВАЖНО: селекторы и URL зависят от того, как устроен поиск у поставщика.
-        Сейчас это каркас:
-        - открываем сайт
-        - вводим артикул в поиск
-        - пытаемся вытащить результат
-
-        Следующий шаг: ты даёшь реальный HTML/Network и мы фиксируем:
-        - URL поиска
-        - селектор поля
-        - селекторы цены/остатка
-        """
         page = self._new_page()
 
         # 1) открыть главную/каталог, где есть поиск

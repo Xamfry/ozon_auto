@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import requests
 
@@ -16,15 +16,6 @@ class TelegramTarget:
 
 
 def _parse_topic_link(link: str) -> Optional[TelegramTarget]:
-    """
-    Поддерживает ссылки вида:
-      - https://t.me/c/<internal_chat_id>/<message_id>
-      - https://t.me/<username>/<message_id>
-
-    Для приватных групп Telegram часто даёт t.me/c/<id>/<msg>.
-    В этом случае chat_id обычно = -100<id>.
-    message_thread_id (topic id) берём как <message_id>.
-    """
     link = (link or "").strip()
     if not link:
         return None
@@ -39,19 +30,12 @@ def _parse_topic_link(link: str) -> Optional[TelegramTarget]:
     m = re.search(r"t\.me/[^/]+/(\d+)", link)
     if m:
         msg_id = int(m.group(1))
-        # для публичных групп chat_id из ссылки не получить.
-        # поэтому без TG_CHAT_ID такая ссылка бесполезна.
         return TelegramTarget(chat_id=0, message_thread_id=msg_id)
 
     return None
 
 
 def load_telegram_target() -> Optional[TelegramTarget]:
-    """
-    Приоритет:
-      1) TG_CHAT_ID + TG_MESSAGE_THREAD_ID
-      2) TG_TOPIC_LINK (+ опционально TG_CHAT_ID если публичная ссылка)
-    """
     raw_chat_id = (
         os.getenv("tg_chat_id")
         or os.getenv("TG_CHAT_ID")
@@ -89,7 +73,6 @@ def load_telegram_target() -> Optional[TelegramTarget]:
         except Exception:
             return None
 
-    # если ссылка публичная и chat_id не получен — без TG_CHAT_ID не получится
     if tgt.chat_id == 0:
         return None
 

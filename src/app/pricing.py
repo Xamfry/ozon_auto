@@ -45,12 +45,6 @@ def volume_liters_from_mm(length_mm: int, width_mm: int, height_mm: int) -> floa
 
 
 def volume_liters_ozon_round(volume_l: float) -> int:
-    """
-    По твоим правилам:
-    0.001-1 => 1
-    1.001-2 => 2
-    и т.д.
-    """
     return max(1, int(ceil(volume_l)))
 
 
@@ -61,9 +55,6 @@ def calc_logistics_rub(price_before_logistics: float, volume_l: float) -> float:
     Объём округляем вверх по правилам.
     """
     if price_before_logistics < 301:
-        # Пока не задано, что делать <301.
-        # Вариант: считать как для 1 литра или 0.
-        # Сейчас делаем 0, чтобы было явно.
         return 0.0
 
     liters = volume_liters_ozon_round(volume_l)

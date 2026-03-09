@@ -172,20 +172,14 @@ def main() -> None:
         )
 
     with AutorusPwSession(profile_dir=profile_dir, headless=False) as supplier:
-        # health-check: must not be guest mode
         supplier.page.goto(
             "https://b2b.autorus.ru/search?pcode=AT-HDR-08&whCode=",
             wait_until="domcontentloaded",
             timeout=60_000,
         )
-        # if supplier.is_guest_mode():
-        #     raise RuntimeError(
-        #         "Autorus: profile is not authorized (guest mode). "
-        #         "Run bootstrap_autorus_profile again and login manually."
-        #     )
+
 
         for row in rows:
-            # базовые фильтры
             if not _has_dimensions(row):
                 skipped += 1
                 continue
@@ -260,7 +254,6 @@ def main() -> None:
     msg3 = f"Supplier sync done={done}, skipped={skipped}, failed={failed}"
     print(msg3)
 
-    # Дополнение к п3: дамп обновлённых товаров в .txt и отправка в Telegram
     tmp_path = None
     try:
         wh = warehouse_id if warehouse_id is not None else 0
@@ -268,8 +261,6 @@ def main() -> None:
         ts = datetime.now(MSK).strftime("%d-%m-%Y_%H-%M-%S")
         fname = f"autorus_bot_{ts}_{wh}.txt"
 
-        # ВАЖНО: в сам файл НЕ пишем строку Supplier sync done=...
-        # Она уходит как текст (caption) вместе с вложенным .txt
         lines: list[str] = []
         if done_offer_ids:
             placeholders = ",".join(["?"] * len(done_offer_ids))
@@ -288,17 +279,15 @@ def main() -> None:
             lines.append("No updated items.")
 
         tmp_dir = Path(tempfile.gettempdir())
-        tmp_file = tmp_dir / fname  # fname уже "ДД-ММ-ГГГГ_ЧЧ-ММ-СС_{wh}.txt"
+        tmp_file = tmp_dir / fname  # fname "ДД-ММ-ГГГГ_ЧЧ-ММ-СС_{wh}.txt"
         tmp_path = str(tmp_file)
 
         tmp_file.write_text("\n".join(lines), encoding="utf-8")
 
-        # Отправляем файл + текст одним сообщением
         tg.send_document(tmp_path, caption=msg3)
         print(f"Sent Telegram stage 3 with document: {tmp_path}")
     except Exception as e:
         print(f"Stage 3: send_document failed: {e!r}")
-        # если файл не ушёл — хотя бы текст пункта 3
         try:
             tg.send_message(msg3)
             print(f"Sent Telegram stage 3 without document")
@@ -312,7 +301,7 @@ def main() -> None:
             except Exception:
                 pass
 
-    # 4) Пауза и статистика "продаются / готовы"
+    # 4) Пауза и статистика
     print(f"Pause 20 seconds")
     for _ in range(1, 21):
         print(f"sleep {_} ...")

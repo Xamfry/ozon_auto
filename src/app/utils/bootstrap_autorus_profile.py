@@ -7,7 +7,6 @@ def main():
     Path("data").mkdir(exist_ok=True)
 
     with sync_playwright() as p:
-        # persistent profile
         context = p.chromium.launch_persistent_context(
             user_data_dir=PROFILE_DIR,
             headless=False,   # нужен GUI только один раз (True)

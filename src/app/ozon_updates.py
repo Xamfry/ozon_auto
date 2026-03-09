@@ -35,8 +35,6 @@ def _chunked(seq: Sequence, size: int) -> list[list]:
 
 
 class _RateLimiter:
-    """Ограничение по количеству товаров в минуту (items/min)."""
-
     def __init__(self, max_items_per_minute: int) -> None:
         self.max_items_per_minute = max_items_per_minute
         self._window_start = time.monotonic()
@@ -63,7 +61,6 @@ class _RateLimiter:
 
 
 def _get_update_logger() -> logging.Logger:
-    """Лог обновлений Ozon в data/update.log."""
     Path("data").mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("ozon_update")
     logger.setLevel(logging.INFO)
@@ -84,8 +81,6 @@ def _get_update_logger() -> logging.Logger:
 
 
 class OzonUpdater(OzonClient):
-    """Методы обновления цен/остатков."""
-
     def import_prices(self, items: list[PriceUpdateItem]) -> dict:
         if not items:
             return {"result": []}

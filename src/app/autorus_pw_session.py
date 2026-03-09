@@ -5,7 +5,6 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 from urllib.parse import quote, urljoin
 
 from bs4 import BeautifulSoup
@@ -211,17 +210,10 @@ class AutorusPwSession:
 
     @staticmethod
     def _is_delivery_days_text(text_lower: str) -> bool:
-        # Признаки срока доставки, а не остатка.
         return any(x in text_lower for x in ("дн", "дня", "дней", "день", "срок", "поставк", "от", "до", "часов", "час", "часа"))
 
     @staticmethod
     def _parse_qty_from_wrapper(wrapper_text: str) -> int:
-        """
-        Безопасный парсер количества:
-        1) приоритет "N шт/штук/ед"
-        2) если похоже на срок доставки (дней/дня/дн) — не считаем это остатком
-        3) фолбек: max число в тексте
-        """
         t = (wrapper_text or "").strip()
         tl = t.lower()
 
