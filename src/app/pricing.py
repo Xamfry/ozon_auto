@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from math import ceil
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 
 R_COEF = 0.623  # шаг 11

@@ -4,8 +4,6 @@ import os
 import sqlite3
 from pathlib import Path
 
-from .config import settings
-
 
 def _has_column(con, table, col) -> bool:
     cur = con.execute(f"PRAGMA table_info({table});")
