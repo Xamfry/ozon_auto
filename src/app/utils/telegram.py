@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -84,6 +83,22 @@ class TelegramNotifier:
         self.token = (token or os.getenv("tg_bot_token") or os.getenv("telegram_bot_token") or "").strip()
         self.target = target or load_telegram_target()
         self.timeout = timeout
+        self.proxies = self._load_proxies()
+        
+    def _load_proxies(self) -> Optional[dict[str, str]]:
+        proxy_url = (
+            os.getenv("tg_proxy")
+            or os.getenv("TG_PROXY")
+            or os.getenv("telegram_proxy")
+            or os.getenv("TELEGRAM_PROXY")
+            or ""
+        ).strip()
+        if not proxy_url:
+            return None
+        return {
+            "http": proxy_url,
+            "https": proxy_url,
+        }
 
     def enabled(self) -> bool:
         return bool(self.token and self.target and self.target.chat_id)
@@ -97,8 +112,13 @@ class TelegramNotifier:
         payload = {"chat_id": self.target.chat_id, "text": text}
         if self.target.message_thread_id is not None:
             payload["message_thread_id"] = self.target.message_thread_id
-        requests.post(self._api_url("sendMessage"), json=payload, timeout=self.timeout).raise_for_status()
-
+        requests.post(
+            self._api_url("sendMessage"),
+            json=payload,
+            timeout=self.timeout,
+            proxies=self.proxies,
+        ).raise_for_status()
+        
     def send_document(self, file_path: str, *, caption: Optional[str] = None) -> None:
         if not self.enabled():
             return
@@ -110,4 +130,11 @@ class TelegramNotifier:
 
         with open(file_path, "rb") as f:
             files = {"document": (os.path.basename(file_path), f)}
-            requests.post(self._api_url("sendDocument"), data=data, files=files, timeout=self.timeout).raise_for_status()
+            requests.post(
+                self._api_url("sendDocument"),
+                data=data,
+                files=files,
+                timeout=self.timeout,
+                proxies=self.proxies,
+            ).raise_for_status()
+            
