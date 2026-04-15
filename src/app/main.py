@@ -5,6 +5,7 @@ import os
 import tempfile
 from datetime import datetime, timezone, timedelta
 import time
+from urllib.parse import quote
 
 from .autorus_pw_session import AutorusPwSession
 from .db import connect, init_db
@@ -50,6 +51,34 @@ def _fetch_offer_ids_by_visibility(oz: OzonClient, visibility: str) -> set[str]:
             break
 
     return offer_ids
+
+
+def _norm_brand(value: str | None) -> str:
+    return "".join(ch for ch in (value or "").upper() if ch.isalnum())
+
+
+def _build_autorus_parts_url(brand: str | None, article: str | None) -> str | None:
+    brand = (brand or "").strip()
+    article = (article or "").strip()
+    if not brand or not article:
+        return None
+    return f"https://b2b.autorus.ru/parts/{quote(brand, safe='')}/{quote(article, safe='')}"
+
+
+def _load_ignored_offer_ids() -> set[str]:
+    raw = (
+        os.getenv("IGNORE_OFFER_IDS")
+        or os.getenv("ignore_offer_ids")
+        or os.getenv("SKIP_OFFER_IDS")
+        or os.getenv("skip_offer_ids")
+        or ""
+    )
+    parts: list[str] = []
+    for chunk in raw.replace(";", ",").replace("\n", ",").split(","):
+        value = chunk.strip()
+        if value:
+            parts.append(value)
+    return set(parts)
 
 
 def get_sale_stats_after_push() -> dict[str, int]:
@@ -130,6 +159,7 @@ def main() -> None:
                 offer_id=a.offer_id,
                 product_id=a.product_id,
                 name=a.name,
+                ozon_brand=a.brand,
                 weight_g=a.weight_g,
                 length_mm=a.length_mm,
                 width_mm=a.width_mm,
@@ -146,8 +176,12 @@ def main() -> None:
         oz.close()
 
     # 2) Supplier + pricing
-    rows = products_repo.list_for_supplier_sync()
+    ignored_offer_ids = _load_ignored_offer_ids()
+    rows_all = products_repo.list_for_supplier_sync()
+    rows = [r for r in rows_all if r.offer_id not in ignored_offer_ids]
     print(f"Supplier sync candidates: {len(rows)}")
+    if ignored_offer_ids:
+        print(f"Ignored offer_ids: {len(ignored_offer_ids)}")
     try:
         tg.send_message(
             "Ozon: non-archived={0}\nOzon: approved in DB={1}\nOzon: details saved={2}\nSupplier sync candidates: {3}".format(
@@ -168,7 +202,7 @@ def main() -> None:
     if not Path(profile_dir).exists():
         raise RuntimeError(
             "Autorus profile not found: data/autorus_profile. "
-            "Run: python -m src.app.bootstrap_autorus_profile"
+            "Run: python -m src.app.utils.bootstrap_autorus_profile"
         )
 
     with AutorusPwSession(profile_dir=profile_dir, headless=False) as supplier:
@@ -192,17 +226,22 @@ def main() -> None:
                 skipped += 1
                 continue
 
-            parts_url = (row.supplier_parts_url or "").strip() or None
+            parts_url = _build_autorus_parts_url(row.ozon_brand, row.offer_id) or (row.supplier_parts_url or "").strip() or None
 
             supplier.log.info(
-                "[ITEM] offer_id=%s pcode=%s parts_url=%s",
+                "[ITEM] offer_id=%s brand=%s pcode=%s parts_url=%s",
                 row.offer_id,
+                row.ozon_brand,
                 pcode,
-                "yes" if parts_url else "no",
+                parts_url or "-",
             )
 
             try:
                 snapshot = supplier.fetch_product_snapshot(pcode=pcode, parts_url=parts_url)
+                if _norm_brand(snapshot.brand) and _norm_brand(row.ozon_brand) and _norm_brand(snapshot.brand) != _norm_brand(row.ozon_brand):
+                    raise RuntimeError(
+                        f"Brand mismatch: ozon={row.ozon_brand!r}, autorus={snapshot.brand!r}"
+                    )
                 offer = snapshot.offer
                 if offer is None:
                     skipped += 1

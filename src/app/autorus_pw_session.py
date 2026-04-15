@@ -70,17 +70,20 @@ class AutorusPwSession:
         self._page.set_default_timeout(120_000)
         return self
 
+
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._context:
             self._context.close()
         if self._p:
             self._p.stop()
 
+
     @property
     def page(self):
         if self._page is None:
             raise RuntimeError("Page is not initialized")
         return self._page
+
 
     def _sleep(self) -> None:
         time.sleep(random.uniform(self.delay_min, self.delay_max))
@@ -89,6 +92,7 @@ class AutorusPwSession:
         Path("data/debug").mkdir(parents=True, exist_ok=True)
         (Path("data/debug") / name).write_text(html, encoding="utf-8")
 
+
     def is_guest_mode(self) -> bool:
         try:
             txt = self.page.locator("body").inner_text(timeout=2000)
@@ -96,9 +100,11 @@ class AutorusPwSession:
             txt = self.page.content()
         return "гостевом режиме" in (txt or "").lower()
 
+
     @staticmethod
     def _text(el) -> str:
         return " ".join(el.get_text(" ", strip=True).split()) if el else ""
+
 
     @staticmethod
     def _parse_price(s: str) -> float:
@@ -109,9 +115,11 @@ class AutorusPwSession:
         except Exception:
             return 0.0
 
+
     @staticmethod
     def _normalize_pcode(value: str) -> str:
         return "".join(ch for ch in (value or "").upper() if ch.isalnum())
+
 
     @staticmethod
     def _variants_for_search(pcode: str) -> list[str]:
@@ -122,8 +130,10 @@ class AutorusPwSession:
             out.append(compact)
         return [x for x in out if x]
 
+
     def _build_parts_url(self, brand: str, number: str) -> str:
         return f"{self.BASE}/parts/{quote(brand, safe='')}/{quote(number, safe='')}"
+
 
     def _extract_search_resolution(self, pcode: str, html: str, current_url: str) -> dict | None:
         wanted = self._normalize_pcode(pcode)
@@ -153,6 +163,7 @@ class AutorusPwSession:
 
         return None
 
+
     def _ensure_not_guest_or_raise(self, stage: str) -> None:
         if self.is_guest_mode():
             html = self.page.content()
@@ -163,6 +174,7 @@ class AutorusPwSession:
                 "If headless=True, try headless=False (or xvfb-run on Linux). "
                 "Saved: data/debug/*_guest_mode.*"
             )
+
 
     def _resolve_parts_ref_by_pcode(self, pcode: str) -> AutorusPartRef:
         last_error: Exception | None = None
@@ -208,9 +220,11 @@ class AutorusPwSession:
             raise RuntimeError(f"Autorus: failed to resolve pcode={pcode}: {last_error}") from last_error
         raise RuntimeError(f"Autorus: failed to resolve pcode={pcode}")
 
+
     @staticmethod
     def _is_delivery_days_text(text_lower: str) -> bool:
         return any(x in text_lower for x in ("дн", "дня", "дней", "день", "срок", "поставк", "от", "до", "часов", "час", "часа"))
+
 
     @staticmethod
     def _parse_qty_from_wrapper(wrapper_text: str) -> int:
@@ -239,6 +253,7 @@ class AutorusPwSession:
             except Exception:
                 pass
         return max(nums) if nums else 0
+
 
     def _fetch_first_offer_from_parts(self, parts_url: str) -> tuple[str | None, str | None, AutorusOffer | None]:
         self.log.info("[SUPPLIER] parts=%s", parts_url)
@@ -283,22 +298,28 @@ class AutorusPwSession:
             )
             return brand, number, offer
 
+
         def deadline_text(b) -> str:
             return self._text(b.select_one(".distrInfoDeadline"))
 
+
         def is_in_stock(b) -> bool:
             return "на складе" in deadline_text(b).lower()
+
 
         def wrapper_text(b) -> str:
             # Берём availability, иначе весь wrapper
             node = b.select_one(".distrInfoAvailability") or b
             return self._text(node)
 
+
         def qty(b) -> int:
             return self._parse_qty_from_wrapper(wrapper_text(b))
 
+
         def price(b) -> float:
             return self._parse_price(self._text(b.select_one(".distrInfoPrice")))
+
 
         def warehouse(b) -> str:
             return self._text(b.select_one(".distrInfoRoute .fr-text-nowrap"))
@@ -328,6 +349,7 @@ class AutorusPwSession:
             deadline=deadline_text(chosen_block),
         )
         return brand, number, offer
+
 
     def fetch_product_snapshot(self, pcode: str, parts_url: str | None = None) -> SupplierProductSnapshot:
         existing_parts = (parts_url or "").strip() or None

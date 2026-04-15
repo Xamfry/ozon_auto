@@ -25,6 +25,7 @@ class Settings(BaseModel):
         "on",
     }
 
+
     def validate_required(self) -> None:
         missing = []
         if not self.ozon_client_id:

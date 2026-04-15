@@ -22,6 +22,7 @@ class OzonProductListItem:
     has_fbs_stocks: bool
     quants: list  # как есть из API (позже можно типизировать)
 
+
 @dataclass(frozen=True)
 class OzonProductInfo:
     product_id: int
@@ -31,6 +32,7 @@ class OzonProductInfo:
     length_mm: Optional[int]
     width_mm: Optional[int]
     height_mm: Optional[int]
+
 
 @dataclass(frozen=True)
 class OzonProductInfoRow:
@@ -44,16 +46,18 @@ class OzonProductInfoRow:
     description_category_id: Optional[int]
     commission_fbs_percent: Optional[float]
 
+
 @dataclass(frozen=True)
 class OzonAttributesRow:
     product_id: int
     offer_id: str
     name: Optional[str]
+    brand: Optional[str]
     weight_g: Optional[int]
     length_mm: Optional[int]
     width_mm: Optional[int]
     height_mm: Optional[int]
-    
+
 
 class OzonClient:
     def __init__(self) -> None:
@@ -67,8 +71,10 @@ class OzonClient:
             },
         )
 
+
     def close(self) -> None:
         self._client.close()
+        
         
     @staticmethod
     def _to_int(v) -> Optional[int]:
@@ -83,6 +89,7 @@ class OzonClient:
             return int(round(float(s)))
         except Exception:
             return None
+
 
     @staticmethod
     def _extract_dims_mm(item: dict) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
@@ -115,6 +122,7 @@ class OzonClient:
 
         return weight, length, width, height
 
+
     @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(5))
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         r = self._client.post(path, json=payload)
@@ -124,6 +132,7 @@ class OzonClient:
         if isinstance(data, dict) and data.get("error"):
             raise OzonApiError(f"API error: {data.get('error')}")
         return data
+    
     
     @staticmethod
     def _parse_price(value) -> float | None:
@@ -136,6 +145,7 @@ class OzonClient:
             return float(s)
         except Exception:
             return None
+
 
     def list_products_all(
         self,
@@ -186,12 +196,29 @@ class OzonClient:
 
         return out
     
+    
     @staticmethod
     def _extract_fbs_commission_percent(it: dict) -> float | None:
         for c in it.get("commissions") or []:
             if c.get("sale_schema") == "FBS" and c.get("percent") is not None:
                 return float(c["percent"])
         return None
+
+
+    @staticmethod
+    def _extract_brand_from_attributes(it: dict) -> Optional[str]:
+        for attr in it.get("attributes") or []:
+            try:
+                if int(attr.get("id") or 0) != 85:
+                    continue
+            except Exception:
+                continue
+            for val in attr.get("values") or []:
+                brand = str(val.get("value") or "").strip()
+                if brand:
+                    return brand
+        return None
+
     
     def get_product_info_list_by_offer_ids(self, offer_ids: list[str]) -> list[OzonProductInfoRow]:
         if not offer_ids:
@@ -230,6 +257,7 @@ class OzonClient:
             )
         return out
     
+    
     def get_attributes_by_offer_ids(self, offer_ids: list[str]) -> list[OzonAttributesRow]:
         if not offer_ids:
             return []
@@ -261,6 +289,7 @@ class OzonClient:
                     product_id=int(it.get("id") or 0),
                     offer_id=str(it.get("offer_id") or ""),
                     name=it.get("name"),
+                    brand=self._extract_brand_from_attributes(it),
                     weight_g=weight if unit_w == "g" else weight,
                     length_mm=depth if unit_dim == "mm" else depth,
                     width_mm=width if unit_dim == "mm" else width,

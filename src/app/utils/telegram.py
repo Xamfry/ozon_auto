@@ -85,6 +85,7 @@ class TelegramNotifier:
         self.timeout = timeout
         self.proxies = self._load_proxies()
         
+        
     def _load_proxies(self) -> Optional[dict[str, str]]:
         proxy_url = (
             os.getenv("tg_proxy")
@@ -100,11 +101,14 @@ class TelegramNotifier:
             "https": proxy_url,
         }
 
+
     def enabled(self) -> bool:
         return bool(self.token and self.target and self.target.chat_id)
 
+
     def _api_url(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self.token}/{method}"
+
 
     def send_message(self, text: str) -> None:
         if not self.enabled():
@@ -118,6 +122,7 @@ class TelegramNotifier:
             timeout=self.timeout,
             proxies=self.proxies,
         ).raise_for_status()
+        
         
     def send_document(self, file_path: str, *, caption: Optional[str] = None) -> None:
         if not self.enabled():

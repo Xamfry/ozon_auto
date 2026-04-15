@@ -21,11 +21,13 @@ class SupplierClient:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
 
+
     def __enter__(self) -> "SupplierClient":
         self._p = sync_playwright().start()
         self._browser = self._p.chromium.launch(headless=self.headless)
         self._context = self._browser.new_context(storage_state=self.state_path)
         return self
+
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._context:
@@ -35,11 +37,13 @@ class SupplierClient:
         if self._p:
             self._p.stop()
 
+
     def _new_page(self) -> Page:
         assert self._context is not None
         page = self._context.new_page()
         page.set_default_timeout(60_000)
         return page
+
 
     @staticmethod
     def _parse_price(value: str) -> Optional[float]:
@@ -53,6 +57,7 @@ class SupplierClient:
         except Exception:
             return None
 
+
     @staticmethod
     def _parse_int(value: str) -> Optional[int]:
         try:
@@ -64,6 +69,7 @@ class SupplierClient:
         except Exception:
             return None
 
+    
     def find_by_article(self, article: str) -> SupplierItem:
         page = self._new_page()
 

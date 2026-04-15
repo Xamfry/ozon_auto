@@ -72,6 +72,7 @@ def init_db(con: sqlite3.Connection) -> None:
             product_id INTEGER NOT NULL,
 
             name TEXT,
+            ozon_brand TEXT,
 
             weight_g INTEGER,
             length_mm INTEGER,   -- depth из attributes -> length_mm
@@ -137,5 +138,7 @@ def init_db(con: sqlite3.Connection) -> None:
     if not _has_column(con, "ozon_products", "ozon_price_calc"):
         con.execute("ALTER TABLE ozon_products ADD COLUMN ozon_price_calc INTEGER;")
 
+    if not _has_column(con, "ozon_product_details", "ozon_brand"):
+        con.execute("ALTER TABLE ozon_product_details ADD COLUMN ozon_brand TEXT;")
 
     con.commit()

@@ -103,6 +103,7 @@ class OzonUpdater(OzonClient):
         }
         return self._post("/v1/product/import/prices", payload)
 
+
     def update_stocks(self, items: list[StockUpdateItem]) -> dict:
         if not items:
             return {"result": []}
@@ -121,6 +122,22 @@ class OzonUpdater(OzonClient):
             ]
         }
         return self._post("/v2/products/stocks", payload)
+
+
+def _load_ignored_offer_ids() -> set[str]:
+    raw = (
+        os.getenv("IGNORE_OFFER_IDS")
+        or os.getenv("ignore_offer_ids")
+        or os.getenv("SKIP_OFFER_IDS")
+        or os.getenv("skip_offer_ids")
+        or ""
+    )
+    out: set[str] = set()
+    for chunk in raw.replace(";", ",").replace("\n", ",").split(","):
+        value = chunk.strip()
+        if value:
+            out.add(value)
+    return out
 
 
 def _env_warehouse_id() -> int:
@@ -144,8 +161,11 @@ def collect_price_updates(con: sqlite3.Connection) -> list[PriceUpdateItem]:
         """
     )
 
+    ignored_offer_ids = _load_ignored_offer_ids()
     out: list[PriceUpdateItem] = []
     for offer_id, product_id, price_current, ozon_price_calc, supplier_qty in cur.fetchall():
+        if str(offer_id) in ignored_offer_ids:
+            continue
         try:
             qty = int(supplier_qty or 0)
         except Exception:
@@ -191,8 +211,11 @@ def collect_stock_updates(con: sqlite3.Connection, *, warehouse_id: int) -> list
         """
     )
 
+    ignored_offer_ids = _load_ignored_offer_ids()
     out: list[StockUpdateItem] = []
     for offer_id, product_id, supplier_qty, ozon_price_calc in cur.fetchall():
+        if str(offer_id) in ignored_offer_ids:
+            continue
         try:
             qty = int(supplier_qty)
         except Exception:
