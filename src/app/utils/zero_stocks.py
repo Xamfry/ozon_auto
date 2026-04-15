@@ -19,6 +19,7 @@ class _RateLimiter:
         self._window_start = time.monotonic()
         self._window_items = 0
 
+
     def acquire(self, items: int) -> None:
         while True:
             now = time.monotonic()
